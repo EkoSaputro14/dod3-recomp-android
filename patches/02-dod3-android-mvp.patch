@@ -1,0 +1,874 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4462af5..c568877 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -19,6 +19,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+ else()
+     set(DOD3_LINUX OFF)
+ endif()
++if(ANDROID)
++    set(DOD3_ANDROID ON)
++else()
++    set(DOD3_ANDROID OFF)
++endif()
++option(DOD3_ANDROID_RUNTIME_SMOKE "Android: build libmain.so runtime smoke without lifted game code" OFF)
+ 
+ # ---------------------------------------------------------------------------
+ # Standards
+@@ -45,6 +51,33 @@ endif()
+ #         -DPS3RECOMP_DIR=/path/to/ps3recomp \
+ #         -DRECOMP_DIR=/path/to/my_game/recompiled
+ #
++if(DOD3_ANDROID AND DOD3_ANDROID_RUNTIME_SMOKE)
++    if(NOT DEFINED PS3RECOMP_DIR)
++        set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ps3recomp")
++    endif()
++    get_filename_component(PS3RECOMP_DIR "${PS3RECOMP_DIR}" ABSOLUTE)
++    set(PS3RECOMP_RSX_VULKAN ON CACHE BOOL "Build the Vulkan RSX backend (Android)" FORCE)
++    set(PS3RECOMP_MSL OFF CACHE BOOL "Build the HLSL -> MSL translator" FORCE)
++    add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk" EXCLUDE_FROM_ALL)
++    find_package(Threads REQUIRED)
++    add_library(main SHARED
++        src/os/android/smoke_main.cpp
++        src/os/android/setup_android.cpp
++    )
++    target_compile_definitions(main PRIVATE DOD3_ANDROID_RUNTIME_SMOKE=1)
++    target_include_directories(main PRIVATE
++        "${PS3RECOMP_DIR}/include"
++        "${PS3RECOMP_DIR}/runtime/memory"
++        "${PS3RECOMP_DIR}/runtime/platform"
++        "${PS3RECOMP_DIR}/libs/video"
++        "${CMAKE_CURRENT_SOURCE_DIR}/src"
++    )
++    target_link_libraries(main PRIVATE ps3recomp_runtime SDL2::SDL2 Threads::Threads ${CMAKE_DL_LIBS} log android)
++    target_link_options(main PRIVATE -Wl,-z,max-page-size=16384)
++    set_target_properties(main PROPERTIES LINKER_LANGUAGE CXX)
++    return()
++endif()
++
+ if(NOT DEFINED PS3RECOMP_DIR)
+     # Default: the ps3recomp submodule in this repo
+     set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ps3recomp")
+@@ -135,8 +168,8 @@ endif()
+ # Linux: the Vulkan option builds the draw engine's Vulkan backend there too
+ # (it needs the Vulkan headers and glslang with SPIRV-Tools: Debian/Ubuntu
+ # libvulkan-dev glslang-dev glslang-tools spirv-tools).
+-if(DOD3_LINUX)
+-    set(PS3RECOMP_RSX_VULKAN ON CACHE BOOL "Build the Vulkan RSX backend (Linux)" FORCE)
++if(DOD3_LINUX OR DOD3_ANDROID)
++    set(PS3RECOMP_RSX_VULKAN ON CACHE BOOL "Build the Vulkan RSX backend (Linux/Android)" FORCE)
+     # nothing presents through Metal here: no spirv-cross in the release
+     set(PS3RECOMP_MSL OFF CACHE BOOL "Build the HLSL -> MSL translator" FORCE)
+ endif()
+@@ -144,11 +177,11 @@ add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
+                  EXCLUDE_FROM_ALL)
+ # (the runtime's public PS3RECOMP_VULKAN_ENGINE_SDL says it built the engine:
+ # its option's variables stay in the subdirectory's scope)
+-if(DOD3_LINUX)
++if(DOD3_LINUX OR DOD3_ANDROID)
+     get_target_property(_rt_defs ps3recomp_runtime INTERFACE_COMPILE_DEFINITIONS)
+ endif()
+-if(DOD3_LINUX AND NOT "PS3RECOMP_VULKAN_ENGINE_SDL=1" IN_LIST _rt_defs)
+-    message(FATAL_ERROR "Linux: the renderer needs glslang (with SPIRV-Tools) for the game's shaders; "
++if((DOD3_LINUX OR DOD3_ANDROID) AND NOT "PS3RECOMP_VULKAN_ENGINE_SDL=1" IN_LIST _rt_defs)
++    message(FATAL_ERROR "Linux/Android: the renderer needs glslang (with SPIRV-Tools) for the game's shaders; "
+                         "Debian/Ubuntu: apt install glslang-dev glslang-tools spirv-tools libvulkan-dev")
+ endif()
+ 
+@@ -284,6 +317,8 @@ elseif(DOD3_LINUX)
+     # The data folder, the log file and the setup's start: the counterpart of
+     # os/win32/setup_win.cpp and os/macos/setup_mac.mm.
+     list(APPEND PORT_PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/os/linux/setup_linux.cpp")
++elseif(DOD3_ANDROID)
++    list(APPEND PORT_PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/os/android/setup_android.cpp")
+ endif()
+ 
+ # The installer (src/install/install.h): the core on every platform; the pages
+@@ -336,12 +371,15 @@ elseif(APPLE)
+                         "${IMGUI_DIR}/backends/imgui_impl_osx.mm"
+                         "${IMGUI_DIR}/backends/imgui_impl_metal.mm"
+                  APPEND PROPERTY COMPILE_OPTIONS "-fobjc-arc")
+-elseif(DOD3_LINUX)
+-    # Linux's window layer (src/ui/ui_linux.cpp): an SDL2 window drawn with
+-    # SDL_Renderer, ImGui's SDL2 and SDL_Renderer2 backends.
++elseif(DOD3_LINUX OR DOD3_ANDROID)
++    # Linux/Android window layer: SDL2 + SDL_Renderer2 + Dear ImGui.
+     list(APPEND IMGUI_SOURCES
+         "${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp"
+         "${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp")
++    set(_ui_plat_src "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ui_linux.cpp")
++    if(DOD3_ANDROID)
++        set(_ui_plat_src "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ui_android.cpp")
++    endif()
+     list(APPEND SETUP_SOURCES
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/wizard.cpp"
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/launcher.cpp"
+@@ -349,7 +387,7 @@ elseif(DOD3_LINUX)
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/look.cpp"
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/setup_shared.cpp"
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/png.cpp"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ui_linux.cpp"
++        "${_ui_plat_src}"
+         ${IMGUI_SOURCES})
+ endif()
+ # The retail PKG key, read from the submodule's tools/pkg_extract.py
+@@ -371,7 +409,7 @@ set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/install/pkg.cpp" APPEND PRO
+ set_property(SOURCE ${SETUP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${IMGUI_DIR}")
+ # third-party code: its warnings are not ours to act on
+ set_property(SOURCE ${IMGUI_SOURCES} APPEND PROPERTY COMPILE_OPTIONS "-w")
+-if(WIN32 OR APPLE OR DOD3_LINUX)
++if(WIN32 OR APPLE OR DOD3_LINUX OR DOD3_ANDROID)
+     # the key art's PNG decoder: stb_image, the copy in the runtime's codec
+     # library, compiled privately (src/ui/png.cpp)
+     set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/png.cpp" APPEND PROPERTY
+@@ -443,16 +481,31 @@ set(PORT_SOURCES
+     ${PORT_UI_SOURCES}
+ )
+ 
+-add_executable(${PROJECT_NAME}
+-    ${PORT_SOURCES}
+-    ${PORT_PLATFORM_SOURCES}
+-    ${SETUP_SOURCES}
+-    ${LIBSRE_LIFTED_CPP}
+-    ${PS3RECOMP_SCAFFOLD}
+-    ${HLE_NID_TABLE}
+-    ${RECOMP_SOURCES}
+-    ${SPU_SOURCES}
+-)
++if(DOD3_ANDROID)
++    set(DOD3_TARGET main)
++    add_library(${DOD3_TARGET} SHARED
++        ${PORT_SOURCES}
++        ${PORT_PLATFORM_SOURCES}
++        ${SETUP_SOURCES}
++        ${LIBSRE_LIFTED_CPP}
++        ${PS3RECOMP_SCAFFOLD}
++        ${HLE_NID_TABLE}
++        ${RECOMP_SOURCES}
++        ${SPU_SOURCES}
++    )
++else()
++    set(DOD3_TARGET ${PROJECT_NAME})
++    add_executable(${DOD3_TARGET}
++        ${PORT_SOURCES}
++        ${PORT_PLATFORM_SOURCES}
++        ${SETUP_SOURCES}
++        ${LIBSRE_LIFTED_CPP}
++        ${PS3RECOMP_SCAFFOLD}
++        ${HLE_NID_TABLE}
++        ${RECOMP_SOURCES}
++        ${SPU_SOURCES}
++    )
++endif()
+ 
+ # The lifted SPU sources use bare #include "spu_context.h". Scope that include
+ # directory (and their flags) to those TUs alone: adding it to the whole target
+@@ -498,7 +551,7 @@ if(WIN32 AND DOD3_SYMBOLS)
+         PROPERTIES COMPILE_OPTIONS "/Z7")
+     # These already carry options (set above); append rather than replace.
+     set_property(SOURCE ${SPU_SOURCES} "${LIBSRE_LIFTED_CPP}" ${SETUP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS "/Z7")
+-    target_link_options(${PROJECT_NAME} PRIVATE /DEBUG /OPT:REF /OPT:ICF)
++    target_link_options(${DOD3_TARGET} PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+ endif()
+ 
+ # The player's settings file goes beside the executable once; a copy the
+@@ -517,7 +570,7 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/gen/app_version.h" CONTENT
+ #define DOD3_VER_PATCH ${PROJECT_VERSION_PATCH}
+ #define DOD3_VERSION_STRING \"${DOD3_VERSION_LABEL}\"
+ ")
+-target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/gen")
++target_include_directories(${DOD3_TARGET} PRIVATE "${CMAKE_BINARY_DIR}/gen")
+ 
+ # The button-prompt atlases (src/res/prompts, drawn by tools/prompt_atlas.py)
+ # as arrays in gen/prompts_data.h, for src/patches/prompts.cpp: the pads',
+@@ -539,13 +592,13 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/gen/prompts_data.h" CONTENT "${_promp
+ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/res/app.rc")
+     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/res/app.rc"
+         PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/gen;${CMAKE_CURRENT_SOURCE_DIR}/src/res")
+-    target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/res/app.rc")
++    target_sources(${DOD3_TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/res/app.rc")
+ endif()
+ 
+-target_compile_definitions(${PROJECT_NAME} PRIVATE DOD3_EBOOT=${DOD3_EBOOT})
++target_compile_definitions(${DOD3_TARGET} PRIVATE DOD3_EBOOT=${DOD3_EBOOT})
+ message(STATUS "EBOOT:           BLUS31197 ${DOD3_EBOOT}")
+ 
+-target_include_directories(${PROJECT_NAME} PRIVATE
++target_include_directories(${DOD3_TARGET} PRIVATE
+     "${RECOMP_DIR}"                            # the generated ppu_recomp.h
+     "${PS3RECOMP_DIR}/include"
+     "${PS3RECOMP_DIR}/runtime/ppu"
+@@ -557,13 +610,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}"
+ )
+ 
+-target_link_libraries(${PROJECT_NAME} PRIVATE
++target_link_libraries(${DOD3_TARGET} PRIVATE
+     ps3recomp_runtime
+ )
+ # The installer's window on the Mac (src/ui/ui_mac.mm): MetalKit's view,
+ # pads for ImGui through GameController, file types for the open panels.
+ if(APPLE)
+-    target_link_libraries(${PROJECT_NAME} PRIVATE
++    target_link_libraries(${DOD3_TARGET} PRIVATE
+         "-framework MetalKit" "-framework GameController" "-framework UniformTypeIdentifiers")
+ endif()
+ # Linux: SDL2 for the setup's window (the runtime links its own use of it
+@@ -571,22 +624,31 @@ endif()
+ if(DOD3_LINUX)
+     find_package(SDL2 REQUIRED)
+     find_package(Threads REQUIRED)
+-    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 Threads::Threads ${CMAKE_DL_LIBS})
++    target_link_libraries(${DOD3_TARGET} PRIVATE SDL2::SDL2 Threads::Threads ${CMAKE_DL_LIBS})
+     # <SDL2/SDL.h>: SDL2::SDL2 exports <prefix>/include/SDL2
+     get_target_property(_sdl2_incs SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+     foreach(_inc IN LISTS _sdl2_incs)
+         get_filename_component(_parent "${_inc}" DIRECTORY)
+-        target_include_directories(${PROJECT_NAME} PRIVATE "${_parent}")
++        target_include_directories(${DOD3_TARGET} PRIVATE "${_parent}")
+     endforeach()
+     # No rpath: everything dod3 links is the system's (tools/package_linux.sh
+     # checks), and an rpath CMake writes empty entries into searches the
+     # current directory.
+-    set_target_properties(${PROJECT_NAME} PROPERTIES SKIP_BUILD_RPATH ON)
++    set_target_properties(${DOD3_TARGET} PROPERTIES SKIP_BUILD_RPATH ON)
++elseif(DOD3_ANDROID)
++    find_package(Threads REQUIRED)
++    target_link_libraries(${DOD3_TARGET} PRIVATE SDL2::SDL2 Threads::Threads ${CMAKE_DL_LIBS} log android m)
++    get_target_property(_sdl2_incs SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
++    foreach(_inc IN LISTS _sdl2_incs)
++        get_filename_component(_parent "${_inc}" DIRECTORY)
++        target_include_directories(${DOD3_TARGET} PRIVATE "${_parent}")
++    endforeach()
++    target_link_options(${DOD3_TARGET} PRIVATE -Wl,-z,max-page-size=16384)
+ endif()
+ 
+ # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
+ # link language from the generated C would leave the C++ standard library out.
+-set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
++set_target_properties(${DOD3_TARGET} PROPERTIES LINKER_LANGUAGE CXX)
+ 
+ # Windows system import libraries. dbghelp symbolizes crash-handler addresses
+ # against the PDB, user32 and gdi32 are what the backend's window and its GDI
+@@ -594,7 +656,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+ # anything a POSIX linker can find; the D3D12 backend's own imports come in
+ # through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c.
+ if(WIN32)
+-    target_link_libraries(${PROJECT_NAME} PRIVATE
++    target_link_libraries(${DOD3_TARGET} PRIVATE
+         dbghelp
+         user32
+         gdi32
+@@ -606,7 +668,7 @@ if(WIN32)
+     # win_stdio_init). -DDOD3_CONSOLE=ON builds a console program again.
+     option(DOD3_CONSOLE "Link dod3.exe as a console program" OFF)
+     if(NOT DOD3_CONSOLE)
+-        target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
++        target_link_options(${DOD3_TARGET} PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+     endif()
+ endif()
+ 
+@@ -614,12 +676,12 @@ endif()
+ # Compiler-specific flags
+ # ---------------------------------------------------------------------------
+ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+-    target_compile_options(${PROJECT_NAME} PRIVATE
++    target_compile_options(${DOD3_TARGET} PRIVATE
+         -Wall -Wextra -Wno-unused-parameter
+         -fno-strict-aliasing
+     )
+ elseif(MSVC)
+-    target_compile_options(${PROJECT_NAME} PRIVATE
++    target_compile_options(${DOD3_TARGET} PRIVATE
+         /W3 /wd4100 /wd4244 /wd4267
+         /Zc:__cplusplus         # report correct __cplusplus value
+         # ppu_recomp.h defines PPU_FENCE, the lowering of the guest's
+@@ -629,7 +691,7 @@ elseif(MSVC)
+         # build already carries the same flag for the same reason.
+         /experimental:c11atomics
+     )
+-    target_compile_definitions(${PROJECT_NAME} PRIVATE
++    target_compile_definitions(${DOD3_TARGET} PRIVATE
+         _CRT_SECURE_NO_WARNINGS
+     )
+ endif()
+@@ -787,4 +849,6 @@ set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3
+ # ---------------------------------------------------------------------------
+ # Install
+ # ---------------------------------------------------------------------------
+-install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
++if(NOT DOD3_ANDROID)
++    install(TARGETS ${DOD3_TARGET} RUNTIME DESTINATION bin)
++endif()
+diff --git a/src/main.cpp b/src/main.cpp
+index a11ddd9..934d665 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -89,7 +89,16 @@ void dod3_mac_log_to_file(void);
+ int dod3_setup_mac(const char* base_dir, int force);
+ }
+ #endif
+-#ifdef __linux__
++#ifdef __ANDROID__
++#include <SDL2/SDL.h>                     /* renames main -> SDL_main on Android */
++extern "C" {   /* src/os/android/setup_android.cpp */
++const char* dod3_android_data_dir(void);
++const char* dod3_android_exe_dir(void);
++void dod3_android_log_to_file(void);
++int dod3_setup_android(const char* base_dir, int force);
++}
++#define dod3_name_thread(n) pthread_setname_np(pthread_self(), n)
++#elif defined(__linux__)
+ #include <SDL2/SDL.h>                     /* the message box when the game cannot load */
+ extern "C" {   /* src/os/linux/setup_linux.cpp */
+ const char* dod3_linux_data_dir(void);
+@@ -2043,6 +2052,10 @@ int main(int argc, char** argv)
+         const char* data = dod3_mac_data_dir();
+         if (!data) return 1;
+         const std::filesystem::path base(data);
++#elif defined(__ANDROID__)
++        const char* data = dod3_android_data_dir();
++        if (!data) return 1;
++        const std::filesystem::path base(data);
+ #elif defined(__linux__)
+         const char* data = dod3_linux_data_dir();
+         if (!data) return 1;
+@@ -2090,6 +2103,17 @@ int main(int argc, char** argv)
+         }
+         dod3_mac_log_to_file();
+         if (dod3_setup_mac(data, force_setup ? 1 : 0) != 0) return 1;
++#elif defined(__ANDROID__)
++        const char* data = dod3_android_data_dir();
++        if (const char* tb = getenv("DOD3_INSTALL_BASE"))
++            if (*tb) data = tb;
++        if (!data || chdir(data) != 0) {
++            fprintf(stderr, "cannot open the data folder %s\n", data ? data : "(none)");
++            return 1;
++        }
++        dod3_android_log_to_file();
++        s_exe_path = std::string(data) + "/dod3";
++        if (dod3_setup_android(data, force_setup ? 1 : 0) != 0) return 1;
+ #elif defined(__linux__)
+         /* The executable's folder, as on Windows, unless it cannot be written
+          * to: then ~/.local/share/dod3-recomp (src/os/linux/setup_linux.cpp). */
+@@ -2121,6 +2145,11 @@ int main(int argc, char** argv)
+         argv = s_release_argv;
+         argc = 2;
+     }
++#ifdef __ANDROID__
++    dod3_setenv("DOD3_UPDATE_CHECK", "0", 0);
++    dod3_setenv("DOD3_FPS", "30", 0);
++    dod3_setenv("RSX_SCALE", "1", 0);
++#endif
+     dod3_boot_mark("the setup's checks done");
+     load_settings_file();
+ #ifdef __linux__
+@@ -2263,6 +2292,8 @@ int main(int argc, char** argv)
+         std::vector<std::string> where;
+ #ifdef __APPLE__
+         if (const char* res = dod3_mac_resources_dir()) where.push_back(std::string(res) + "/shaders/override");
++#elif defined(__ANDROID__)
++        where.push_back(std::string(dod3_android_exe_dir()) + "/shaders/override");
+ #elif defined(__linux__)
+         /* the release's folder, which is not the data folder when that is
+          * ~/.local/share/dod3-recomp (src/os/linux/setup_linux.cpp) */
+@@ -2399,7 +2430,11 @@ int main(int argc, char** argv)
+     s_boot_entry = entry;
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
++#ifdef __ANDROID__
++    pthread_attr_setstacksize(&attr, 32u * 1024 * 1024);
++#else
+     pthread_attr_setstacksize(&attr, 256u * 1024 * 1024);
++#endif
+     pthread_t guest;
+     if (pthread_create(&guest, &attr, guest_main, NULL) != 0) {
+         fprintf(stderr, "ERROR: could not start the guest thread\n");
+diff --git a/src/os/android/setup_android.cpp b/src/os/android/setup_android.cpp
+new file mode 100644
+index 0000000..2468a54
+--- /dev/null
++++ b/src/os/android/setup_android.cpp
+@@ -0,0 +1,284 @@
++/*
++ * Android platform glue: storage base path, logcat+file tee, setup check,
++ * and JNI diagnostics for Dod3Activity.
++ */
++#include <android/log.h>
++#include <dlfcn.h>
++#include <jni.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <vulkan/vulkan.h>
++
++#include <SDL2/SDL.h>
++
++#include <filesystem>
++#include <mutex>
++#include <string>
++#include <system_error>
++#include <thread>
++#include <vector>
++
++#ifndef DOD3_ANDROID_RUNTIME_SMOKE
++#include "install/install.h"
++#include "ui/ui.h"
++#endif
++
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "Dod3Android", __VA_ARGS__)
++#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Dod3Android", __VA_ARGS__)
++
++namespace {
++
++std::mutex s_mu;
++std::string s_base_dir;
++bool s_log_started = false;
++
++std::string resolve_base_dir()
++{
++    std::lock_guard<std::mutex> g(s_mu);
++    if (!s_base_dir.empty()) return s_base_dir;
++    if (const char* env = getenv("DOD3_INSTALL_BASE"); env && *env) {
++        s_base_dir = env;
++        return s_base_dir;
++    }
++    if (const char* ext = SDL_AndroidGetExternalStoragePath(); ext && *ext) {
++        s_base_dir = ext;
++        return s_base_dir;
++    }
++    if (const char* intl = SDL_AndroidGetInternalStoragePath(); intl && *intl) {
++        s_base_dir = intl;
++        return s_base_dir;
++    }
++    s_base_dir = "/storage/emulated/0/Dod3Recomp";
++    return s_base_dir;
++}
++
++bool has_ext(const std::vector<VkExtensionProperties>& exts, const char* name)
++{
++    for (const auto& e : exts)
++        if (strcmp(e.extensionName, name) == 0) return true;
++    return false;
++}
++
++std::string probe_vulkan()
++{
++    void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
++    if (!lib) return "Vulkan: GAGAL memuat libvulkan.so (" + std::string(dlerror() ? dlerror() : "?") + ")";
++
++    auto get_inst_proc = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
++    if (!get_inst_proc) {
++        dlclose(lib);
++        return "Vulkan: vkGetInstanceProcAddr tidak ditemukan";
++    }
++    auto enum_inst_ver = (PFN_vkEnumerateInstanceVersion)get_inst_proc(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
++    auto create_inst = (PFN_vkCreateInstance)get_inst_proc(VK_NULL_HANDLE, "vkCreateInstance");
++    if (!create_inst) {
++        dlclose(lib);
++        return "Vulkan: vkCreateInstance tidak ditemukan";
++    }
++
++    uint32_t loader_ver = VK_API_VERSION_1_0;
++    if (enum_inst_ver) enum_inst_ver(&loader_ver);
++    uint32_t req_ver = loader_ver >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3
++                     : loader_ver >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2 : VK_API_VERSION_1_1;
++
++    VkApplicationInfo app = {};
++    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
++    app.pApplicationName = "Dod3Recomp";
++    app.pEngineName = "ps3recomp";
++    app.apiVersion = req_ver;
++
++    VkInstanceCreateInfo ici = {};
++    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
++    ici.pApplicationInfo = &app;
++
++    VkInstance inst = VK_NULL_HANDLE;
++    VkResult vr = create_inst(&ici, nullptr, &inst);
++    if (vr != VK_SUCCESS) {
++        dlclose(lib);
++        return "Vulkan: vkCreateInstance gagal (" + std::to_string((int)vr) + ")";
++    }
++
++    auto destroy_inst = (PFN_vkDestroyInstance)get_inst_proc(inst, "vkDestroyInstance");
++    auto enum_phys = (PFN_vkEnumeratePhysicalDevices)get_inst_proc(inst, "vkEnumeratePhysicalDevices");
++    auto get_props = (PFN_vkGetPhysicalDeviceProperties)get_inst_proc(inst, "vkGetPhysicalDeviceProperties");
++    auto get_feat2 = (PFN_vkGetPhysicalDeviceFeatures2)get_inst_proc(inst, "vkGetPhysicalDeviceFeatures2");
++    auto get_fmt = (PFN_vkGetPhysicalDeviceFormatProperties)get_inst_proc(inst, "vkGetPhysicalDeviceFormatProperties");
++    auto enum_dev_ext = (PFN_vkEnumerateDeviceExtensionProperties)get_inst_proc(inst, "vkEnumerateDeviceExtensionProperties");
++
++    uint32_t nd = 0;
++    enum_phys(inst, &nd, nullptr);
++    std::string out = "Vulkan Loader: " + std::to_string(VK_API_VERSION_MAJOR(loader_ver)) + "." +
++                      std::to_string(VK_API_VERSION_MINOR(loader_ver)) + "." +
++                      std::to_string(VK_API_VERSION_PATCH(loader_ver));
++    if (nd > 0) {
++        std::vector<VkPhysicalDevice> devs(nd);
++        enum_phys(inst, &nd, devs.data());
++        VkPhysicalDeviceProperties props = {};
++        get_props(devs[0], &props);
++        out += "\nGPU: " + std::string(props.deviceName) + " (Vulkan " +
++               std::to_string(VK_API_VERSION_MAJOR(props.apiVersion)) + "." +
++               std::to_string(VK_API_VERSION_MINOR(props.apiVersion)) + "." +
++               std::to_string(VK_API_VERSION_PATCH(props.apiVersion)) + ")";
++
++        uint32_t ne = 0;
++        enum_dev_ext(devs[0], nullptr, &ne, nullptr);
++        std::vector<VkExtensionProperties> exts(ne);
++        if (ne) enum_dev_ext(devs[0], nullptr, &ne, exts.data());
++
++        VkPhysicalDeviceFeatures2 f2 = {};
++        f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
++        if (get_feat2) get_feat2(devs[0], &f2);
++
++        VkFormatProperties d32 = {}, d24 = {};
++        get_fmt(devs[0], VK_FORMAT_D32_SFLOAT_S8_UINT, &d32);
++        get_fmt(devs[0], VK_FORMAT_D24_UNORM_S8_UINT, &d24);
++        const bool ok_d32 = (d32.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
++        const bool ok_d24 = (d24.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
++
++        out += "\nCaps: BCn=" + std::string(f2.features.textureCompressionBC ? "YA" : "TIDAK") +
++               " | D32S8=" + std::string(ok_d32 ? "YA" : "TIDAK") +
++               " | D24S8=" + std::string(ok_d24 ? "YA" : "TIDAK") +
++               " | KHR_dyn_render=" + std::string(has_ext(exts, "VK_KHR_dynamic_rendering") ? "YA" : "TIDAK") +
++               " | KHR_timeline=" + std::string(has_ext(exts, "VK_KHR_timeline_semaphore") ? "YA" : "TIDAK");
++    } else {
++        out += "\nGPU: Tidak ada physical device ditemukan";
++    }
++    if (destroy_inst) destroy_inst(inst, nullptr);
++    dlclose(lib);
++    return out;
++}
++
++}  // namespace
++
++extern "C" const char* dod3_android_exe_dir(void)
++{
++    static std::string dir;
++    dir = resolve_base_dir();
++    return dir.c_str();
++}
++
++extern "C" const char* dod3_android_data_dir(void)
++{
++    static std::string dir;
++    dir = resolve_base_dir();
++    std::error_code ec;
++    std::filesystem::create_directories(std::filesystem::path(dir), ec);
++    return dir.c_str();
++}
++
++extern "C" void dod3_android_log_to_file(void)
++{
++    std::lock_guard<std::mutex> g(s_mu);
++    if (s_log_started) return;
++    s_log_started = true;
++
++    rename("dod3.log", "dod3.prev.log");
++    FILE* f = fopen("dod3.log", "w");
++
++    int pfd[2];
++    if (pipe(pfd) != 0) {
++        if (f) fclose(f);
++        return;
++    }
++    dup2(pfd[1], STDOUT_FILENO);
++    dup2(pfd[1], STDERR_FILENO);
++    if (pfd[1] > 2) close(pfd[1]);
++    setvbuf(stdout, nullptr, _IOLBF, 0);
++    setvbuf(stderr, nullptr, _IOLBF, 0);
++
++    std::thread([fd = pfd[0], f]() {
++        pthread_setname_np(pthread_self(), "dod3_log_tee");
++        char buf[4096];
++        std::string line;
++        for (;;) {
++            const ssize_t n = read(fd, buf, sizeof buf);
++            if (n <= 0) break;
++            if (f) {
++                fwrite(buf, 1, (size_t)n, f);
++                fflush(f);
++            }
++            for (ssize_t i = 0; i < n; i++) {
++                if (buf[i] == '\n') {
++                    if (!line.empty()) {
++                        __android_log_write(ANDROID_LOG_INFO, "Dod3Android", line.c_str());
++                        line.clear();
++                    }
++                } else {
++                    line += buf[i];
++                    if (line.size() >= 1000) {
++                        __android_log_write(ANDROID_LOG_INFO, "Dod3Android", line.c_str());
++                        line.clear();
++                    }
++                }
++            }
++        }
++        if (!line.empty()) __android_log_write(ANDROID_LOG_INFO, "Dod3Android", line.c_str());
++        close(fd);
++        if (f) fclose(f);
++    }).detach();
++}
++
++extern "C" int dod3_setup_android(const char* base_dir, int force)
++{
++#ifdef DOD3_ANDROID_RUNTIME_SMOKE
++    (void)base_dir;
++    (void)force;
++    return 0;
++#else
++    using namespace dod3setup;
++    const fs::path base(base_dir);
++    if (!installed(base).ready() || force) {
++        LOGI("Game files belum lengkap di %s (menunggu user via launcher/wizard)", base_dir);
++        const int r = run_installer(base);
++        if (r >= 0) return r;
++        LOGE("Installer SDL/ImGui gagal dibuka; letakkan game/disc dan elf/EBOOT_101.ELF di %s", base_dir);
++        return 1;
++    }
++    return 0;
++#endif
++}
++
++extern "C" JNIEXPORT void JNICALL
++Java_com_dod3recomp_android_Dod3Activity_nativeSetBaseDir(JNIEnv* env, jclass, jstring path)
++{
++    if (!path) return;
++    const char* s = env->GetStringUTFChars(path, nullptr);
++    if (!s) return;
++    {
++        std::lock_guard<std::mutex> g(s_mu);
++        s_base_dir = s;
++    }
++    setenv("DOD3_INSTALL_BASE", s, 1);
++    LOGI("Base dir diset via JNI: %s", s);
++    env->ReleaseStringUTFChars(path, s);
++}
++
++extern "C" JNIEXPORT jstring JNICALL
++Java_com_dod3recomp_android_Dod3Activity_nativeRunDiagnostics(JNIEnv* env, jclass)
++{
++    namespace fs = std::filesystem;
++    const std::string base = resolve_base_dir();
++    const long pg = sysconf(_SC_PAGESIZE);
++    std::error_code ec;
++    const bool has_sfo = fs::exists(fs::path(base) / "game/disc/PS3_GAME/PARAM.SFO", ec);
++    const bool has_elf = fs::exists(fs::path(base) / "elf/EBOOT_101.ELF", ec);
++
++    std::string report =
++#ifdef DOD3_ANDROID_RUNTIME_SMOKE
++        "Mode Build: RUNTIME SMOKE (bring-up Vulkan/SDL2 tanpa lifted game code)\n"
++#else
++        "Mode Build: FULL STANDALONE (lifted PPU/SPU + ps3recomp)\n"
++#endif
++        "ABI: arm64-v8a | Host Page Size: " + std::to_string(pg) + " bytes\n" +
++        probe_vulkan() + "\n" +
++        "Folder Data: " + base + "\n" +
++        "PARAM.SFO: " + std::string(has_sfo ? "ADA" : "BELUM ADA") +
++        " | EBOOT_101.ELF: " + std::string(has_elf ? "ADA" : "BELUM ADA");
++
++    LOGI("Diagnostics:\n%s", report.c_str());
++    return env->NewStringUTF(report.c_str());
++}
+diff --git a/src/os/android/smoke_main.cpp b/src/os/android/smoke_main.cpp
+new file mode 100644
+index 0000000..7a67168
+--- /dev/null
++++ b/src/os/android/smoke_main.cpp
+@@ -0,0 +1,50 @@
++/*
++ * Day-1 Android runtime smoke entrypoint (DOD3_ANDROID_RUNTIME_SMOKE=1).
++ * Verifies SDL2 + Vulkan 1.1-1.3 draw engine + glslang SPIR-V init on device
++ * without requiring lifted game C++ files.
++ */
++#include <android/log.h>
++#include <SDL2/SDL.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#include "rsx_shader_spirv.h"
++#include "rsx_vulkan_engine.h"
++
++extern "C" {
++const char* dod3_android_data_dir(void);
++void dod3_android_log_to_file(void);
++}
++
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "Dod3Android", __VA_ARGS__)
++#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Dod3Android", __VA_ARGS__)
++
++int main(int argc, char** argv)
++{
++    (void)argc;
++    (void)argv;
++
++    const char* data = dod3_android_data_dir();
++    if (data && *data) chdir(data);
++    dod3_android_log_to_file();
++
++    LOGI("=== Dod3Recomp Android Runtime Smoke Start (data=%s) ===", data ? data : "(null)");
++    LOGI("glslang SPIR-V available: %d", rsx_hlsl_to_spirv_available());
++
++    if (rsx_vulkan_engine_init(1280, 720, "Drakengard 3 Recompiled (Smoke)") != 0) {
++        LOGE("rsx_vulkan_engine_init FAILED");
++        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Dod3Recomp Smoke",
++                                 "Vulkan init failed. Check adb logcat -s Dod3Android.", nullptr);
++        return 1;
++    }
++
++    LOGI("rsx_vulkan_engine_init OK — entering event pump loop");
++    while (rsx_vulkan_engine_pump_messages() == 0) {
++        SDL_Delay(16);
++    }
++
++    rsx_vulkan_engine_shutdown();
++    LOGI("=== Dod3Recomp Android Runtime Smoke Clean Exit ===");
++    return 0;
++}
+diff --git a/src/ui/ui_android.cpp b/src/ui/ui_android.cpp
+new file mode 100644
+index 0000000..43e6645
+--- /dev/null
++++ b/src/ui/ui_android.cpp
+@@ -0,0 +1,136 @@
++/*
++ * Android Dear ImGui window layer (src/ui/ui.h): SDL2 fullscreen + SDL_Renderer2.
++ * File picking on Android is handled via Storage Access Framework in Dod3Activity.
++ */
++#include "ui/ui.h"
++
++#include "imgui.h"
++#include "backends/imgui_impl_sdl2.h"
++#include "backends/imgui_impl_sdlrenderer2.h"
++
++#include <SDL2/SDL.h>
++#include <stdio.h>
++
++namespace dod3setup {
++namespace {
++
++struct Ui {
++    SDL_Window* window = nullptr;
++    SDL_Renderer* renderer = nullptr;
++    bool live = false;
++    bool closed = false;
++};
++Ui s_ui;
++
++}  // namespace
++
++bool ui_init(const char* title, int width, int height, const std::string& font_path, float font_px)
++{
++    (void)width;
++    (void)height;
++    if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
++        fprintf(stderr, "[setup] SDL: %s\n", SDL_GetError());
++        return false;
++    }
++    s_ui.window = SDL_CreateWindow(title ? title : "Drakengard 3 Recompiled", SDL_WINDOWPOS_UNDEFINED,
++                                   SDL_WINDOWPOS_UNDEFINED, 0, 0,
++                                   SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
++    if (!s_ui.window) {
++        fprintf(stderr, "[setup] SDL_CreateWindow: %s\n", SDL_GetError());
++        return false;
++    }
++    s_ui.renderer = SDL_CreateRenderer(s_ui.window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
++    if (!s_ui.renderer) s_ui.renderer = SDL_CreateRenderer(s_ui.window, -1, SDL_RENDERER_SOFTWARE);
++    if (!s_ui.renderer) {
++        SDL_DestroyWindow(s_ui.window);
++        s_ui = Ui{};
++        return false;
++    }
++
++    IMGUI_CHECKVERSION();
++    ImGui::CreateContext();
++    ImGuiIO& io = ImGui::GetIO();
++    io.IniFilename = nullptr;
++    io.LogFilename = nullptr;
++    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
++    if (!ImGui_ImplSDL2_InitForSDLRenderer(s_ui.window, s_ui.renderer) || !ImGui_ImplSDLRenderer2_Init(s_ui.renderer)) {
++        ImGui::DestroyContext();
++        SDL_DestroyRenderer(s_ui.renderer);
++        SDL_DestroyWindow(s_ui.window);
++        s_ui = Ui{};
++        return false;
++    }
++    if (!font_path.empty() && !io.Fonts->AddFontFromFileTTF(font_path.c_str(), font_px))
++        fprintf(stderr, "[setup] could not load font %s\n", font_path.c_str());
++    if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault();
++    ImGui::GetStyle().FontSizeBase = font_px;
++    s_ui.live = true;
++    s_ui.closed = false;
++    return true;
++}
++
++bool ui_frame_begin()
++{
++    for (;;) {
++        SDL_Event e;
++        while (SDL_PollEvent(&e)) {
++            ImGui_ImplSDL2_ProcessEvent(&e);
++            if (e.type == SDL_QUIT) s_ui.closed = true;
++            if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE &&
++                e.window.windowID == SDL_GetWindowID(s_ui.window))
++                s_ui.closed = true;
++        }
++        if (!s_ui.live || s_ui.closed) return false;
++        if (SDL_GetWindowFlags(s_ui.window) & SDL_WINDOW_MINIMIZED) {
++            SDL_WaitEventTimeout(nullptr, 50);
++            continue;
++        }
++        break;
++    }
++    ImGui_ImplSDLRenderer2_NewFrame();
++    ImGui_ImplSDL2_NewFrame();
++    ImGui::NewFrame();
++    return true;
++}
++
++void ui_frame_end()
++{
++    ImGui::Render();
++    ImGuiIO& io = ImGui::GetIO();
++    SDL_RenderSetScale(s_ui.renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
++    SDL_SetRenderDrawColor(s_ui.renderer, 0, 0, 0, 255);
++    SDL_RenderClear(s_ui.renderer);
++    ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), s_ui.renderer);
++    SDL_RenderPresent(s_ui.renderer);
++}
++
++void ui_shutdown()
++{
++    if (!s_ui.live) return;
++    ImGui_ImplSDLRenderer2_Shutdown();
++    ImGui_ImplSDL2_Shutdown();
++    ImGui::DestroyContext();
++    SDL_DestroyRenderer(s_ui.renderer);
++    SDL_DestroyWindow(s_ui.window);
++    SDL_PumpEvents();
++    SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS);
++    s_ui = Ui{};
++}
++
++std::vector<std::filesystem::path> ui_pick_files(const char* title,
++                                                 const std::vector<std::pair<std::string, std::string>>& filters)
++{
++    (void)title;
++    (void)filters;
++    fprintf(stderr, "[setup] Android uses Storage Access Framework in Dod3Activity to import ISO/PKG files.\n");
++    return {};
++}
++
++std::filesystem::path ui_pick_folder(const char* title)
++{
++    (void)title;
++    fprintf(stderr, "[setup] Android uses /storage/emulated/0/Dod3Recomp or SAF import.\n");
++    return {};
++}
++
++}  // namespace dod3setup

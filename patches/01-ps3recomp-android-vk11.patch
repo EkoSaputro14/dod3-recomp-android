@@ -1,0 +1,1233 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c398ede..8e4e891 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -53,7 +53,14 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
+ option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux)" OFF)
+ list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
+ if(PS3RECOMP_RSX_VULKAN)
+-    find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
++    if(ANDROID AND NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
++        find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h
++            HINTS "${CMAKE_SYSROOT}/usr/include"
++            NO_CMAKE_FIND_ROOT_PATH)
++    endif()
++    if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
++        find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
++    endif()
+     if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
+         message(FATAL_ERROR "Vulkan headers not found. Debian/Ubuntu: "
+             "libvulkan-dev, Fedora: vulkan-headers -- or pass "
+@@ -149,7 +156,11 @@ if(WIN32 AND PS3RECOMP_PAD_SDL2)
+     target_compile_definitions(ps3recomp_runtime PRIVATE PS3RECOMP_PAD_USE_SDL2)
+ endif()
+ if(NOT WIN32 OR PS3RECOMP_PAD_SDL2)
+-    find_package(SDL2 QUIET)
++    if(TARGET SDL2::SDL2)
++        set(SDL2_FOUND TRUE)
++    else()
++        find_package(SDL2 QUIET)
++    endif()
+     if(SDL2_FOUND)
+         if(TARGET SDL2::SDL2)
+             target_link_libraries(ps3recomp_runtime PRIVATE SDL2::SDL2)
+@@ -190,6 +201,10 @@ if(NOT WIN32)
+     target_link_libraries(ps3recomp_runtime PRIVATE Threads::Threads)
+ endif()
+ 
++if(ANDROID)
++    target_link_libraries(ps3recomp_runtime PUBLIC log ${CMAKE_DL_LIBS})
++endif()
++
+ # Frame capture (libs/video/rsx_capture.c) writes gzip and the replay
+ # harness reads it. Without zlib on the host (a bare Windows runner) the
+ # capture is compiled out and rsx_replay is not built; the game is unaffected.
+@@ -274,9 +289,28 @@ endif()
+ # PS3RECOMP_MSL=OFF leaves it out where nothing presents through Metal: a
+ # Linux port's release, which would otherwise carry libspirv-cross for it.
+ option(PS3RECOMP_MSL "Build the HLSL -> MSL translator (Metal; on Linux for its tests)" ON)
++if(ANDROID)
++    set(PS3RECOMP_MSL OFF CACHE BOOL "Build the HLSL -> MSL translator" FORCE)
++endif()
+ set(PS3RECOMP_MSL_TRANSLATION OFF)
+ if(UNIX)
+-    find_package(glslang CONFIG QUIET)
++    if(TARGET glslang::glslang AND TARGET glslang::SPIRV)
++        set(glslang_FOUND TRUE)
++    elseif(TARGET glslang AND TARGET SPIRV)
++        if(NOT TARGET glslang::glslang)
++            add_library(glslang::glslang ALIAS glslang)
++        endif()
++        if(NOT TARGET glslang::SPIRV)
++            add_library(glslang::SPIRV ALIAS SPIRV)
++        endif()
++        if(TARGET glslang-default-resource-limits AND NOT TARGET glslang::glslang-default-resource-limits)
++            add_library(glslang::glslang-default-resource-limits ALIAS glslang-default-resource-limits)
++        endif()
++        set(glslang_FOUND TRUE)
++        set(glslang_VERSION "in-tree")
++    else()
++        find_package(glslang CONFIG QUIET)
++    endif()
+ 
+     # spirv-cross's C API. Debian ships it as a shared library and Homebrew as
+     # a static one, under different pkg-config names -- and pkg-config itself
+@@ -363,7 +397,7 @@ if(PS3RECOMP_RSX_VULKAN)
+         # Windows build runs with RSX_BACKEND=vulkan, in an SDL2 window: what a
+         # port boots on Linux (rsx_vulkan_engine_init). It brings the mouse
+         # (rsx_host_mouse.h) with its window, so rsx_host_mouse.c stands down.
+-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID)
+             set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_vulkan_engine.c"
+                          APPEND PROPERTY COMPILE_DEFINITIONS PS3RECOMP_HAVE_VULKAN=1)
+             set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_vulkan_engine.c"
+@@ -719,8 +753,7 @@ endif()
+ #
+ # The HLE NID table is generated exactly as a port generates it, so the smoke
+ # title's firmware imports resolve through the same bridge a game's do.
+-if(UNIX)
+-    find_package(Python3 COMPONENTS Interpreter QUIET)
++if(UNIX AND NOT ANDROID)
+     if(NOT Python3_Interpreter_FOUND)
+         message(STATUS "  Boot smoke:   no python3; ps3recomp_boot_smoke not built")
+     else()
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index fab39e5..bd6b64c 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -35,6 +35,7 @@ void put_log(char* log, u32 log_size, const char* what, const char* detail)
+ 
+ std::once_flag s_init_once;
+ bool s_init_ok;
++u32 s_vk_target_version = 0x00403000u; /* VK_API_VERSION_1_3 */
+ 
+ /* One translation through glslang. False with the reason in `log`. */
+ bool translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv, char* log, u32 log_size)
+@@ -48,8 +49,16 @@ bool translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv, ch
+     const char* strings[1] = { hlsl };
+     shader.setStrings(strings, 1);
+     shader.setEnvInput(glslang::EShSourceHlsl, lang, glslang::EShClientVulkan, 100);
+-    shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
+-    shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_3);
++    if (s_vk_target_version < 0x00402000u) {
++        shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_1);
++        shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
++    } else if (s_vk_target_version < 0x00403000u) {
++        shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_2);
++        shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
++    } else {
++        shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
++        shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_3);
++    }
+     /* SPIR-V FragCoord.w is 1/w (FXC's SV_POSITION.w is w): tells the FP
+      * decompiler's _rsx_inv_w helper which one it gets. */
+     shader.setPreamble("#define RSX_FRAGCOORD_W_IS_RCP 1\n");
+@@ -198,6 +207,7 @@ u32 copy_out(const std::vector<unsigned int>& spirv, u32** words)
+ }  // namespace
+ 
+ extern "C" int rsx_hlsl_to_spirv_available(void) { return 1; }
++extern "C" void rsx_spirv_set_target(u32 vk_api_version) { s_vk_target_version = vk_api_version; }
+ 
+ extern "C" u32 rsx_hlsl_to_spirv(const char* hlsl, int stage, u32** words, char* log, u32 log_size)
+ {
+@@ -254,6 +264,7 @@ extern "C" void rsx_hlsl_to_spirv_cache_reset(void)
+ #else   /* no glslang */
+ 
+ extern "C" int rsx_hlsl_to_spirv_available(void) { return 0; }
++extern "C" void rsx_spirv_set_target(u32 vk_api_version) { (void)vk_api_version; }
+ extern "C" u32 rsx_hlsl_to_spirv(const char* hlsl, int stage, u32** words, char* log, u32 log_size)
+ {
+     (void)hlsl; (void)stage;
+diff --git a/libs/video/rsx_shader_spirv.h b/libs/video/rsx_shader_spirv.h
+index a5c181c..7298e95 100644
+--- a/libs/video/rsx_shader_spirv.h
++++ b/libs/video/rsx_shader_spirv.h
+@@ -43,6 +43,10 @@ extern "C" {
+ /* 1 when built with glslang (PS3RECOMP_HAVE_GLSLANG_SPIRV), 0 for the stub. */
+ int rsx_hlsl_to_spirv_available(void);
+ 
++/* Set target Vulkan API version (e.g. VK_API_VERSION_1_1 / 1_2 / 1_3) so
++ * glslang emits compatible SPIR-V (1.0 on Vk 1.1, 1.5 on Vk 1.2, 1.3+ on Vk 1.3). */
++void rsx_spirv_set_target(u32 vk_api_version);
++
+ /* Translate one HLSL shader (entry point `main`) to SPIR-V. On success returns
+  * the word count and sets *words to a malloc'd array the caller frees; on
+  * failure returns 0 with the reason in `log` (may be NULL). Thread-safe. */
+diff --git a/libs/video/rsx_vulkan_encode.inc b/libs/video/rsx_vulkan_encode.inc
+index caff082..7109d20 100644
+--- a/libs/video/rsx_vulkan_encode.inc
++++ b/libs/video/rsx_vulkan_encode.inc
+@@ -51,7 +51,8 @@ static VkPrimitiveTopology s_cur_topo;
+ static void render_end(void)
+ {
+     if (!s_in_render) return;
+-    vkCmdEndRendering(s_cmd);
++    if (s_use_dyn_render) vkCmdEndRendering(s_cmd);
++    else vkCmdEndRenderPass(s_cmd);
+     s_in_render = 0;
+     s_bar_global = 1;     /* the next pass may read or write what this one wrote */
+ }
+@@ -64,6 +65,40 @@ static int s_cur_ms;
+ static void render_begin(const u32* rt, u32 nrt, u32 depth, u32 tw, u32 th, int ms)
+ {
+     bar_flush();
++    if (!s_use_dyn_render) {
++        VkFormat fmts[RSX_BE_MAX_COLOR_TARGETS];
++        VkImageView views[RSX_BE_MAX_COLOR_TARGETS * 2 + 1];
++        u32 natt = 0;
++        for (u32 k = 0; k < nrt; k++) {
++            EngObj* o = eng_owner(rt[k]);
++            fmts[k] = o->fmt;
++            views[natt++] = (ms && o->ms_att) ? o->ms_att : (o->att ? o->att : o->view);
++        }
++        if (ms) {
++            for (u32 k = 0; k < nrt; k++) {
++                EngObj* o = eng_owner(rt[k]);
++                views[natt++] = o->att ? o->att : o->view;
++            }
++        }
++        EngObj* z = eng_owner(depth);
++        if (z) views[natt++] = (ms && z->ms_att) ? z->ms_att : z->att;
++        const VkSampleCountFlagBits samples = ms ? (VkSampleCountFlagBits)s_ms_n : VK_SAMPLE_COUNT_1_BIT;
++        const VkRenderPass rp = vk_get_render_pass(nrt, fmts, z != NULL, ENG_DEPTH_FMT, samples, 0);
++        const VkFramebuffer fb = rp ? vk_get_framebuffer(rp, tw, th, natt, views) : VK_NULL_HANDLE;
++        if (rp && fb) {
++            VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
++            rbi.renderPass = rp;
++            rbi.framebuffer = fb;
++            rbi.renderArea.extent.width = tw;
++            rbi.renderArea.extent.height = th;
++            vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
++            s_cur_ms = ms;
++            s_in_render = 1;
++            for (u32 k = 0; k < RSX_BE_MAX_COLOR_TARGETS; k++) s_cur_rt[k] = k < nrt ? rt[k] : 0;
++            s_cur_nrt = nrt; s_cur_depth = depth; s_cur_tw = tw; s_cur_th = th;
++        }
++        return;
++    }
+     VkRenderingAttachmentInfo ca[RSX_BE_MAX_COLOR_TARGETS];
+     for (u32 k = 0; k < nrt; k++) {
+         EngObj* o = eng_owner(rt[k]);
+@@ -264,20 +299,32 @@ static void eng_ms_refresh(u32 h)
+     obj_layout(o, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+     img_layout(o->ms_img, &o->ms_layout, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+     bar_flush();
+-    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+-    ca.imageView = o->ms_att; ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+-    ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+-    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+-    ri.renderArea.extent.width = o->w; ri.renderArea.extent.height = o->h;
+-    ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &ca;
+-    vkCmdBeginRendering(s_cmd, &ri);
++    if (s_use_dyn_render) {
++        VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
++        ca.imageView = o->ms_att; ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++        ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++        VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
++        ri.renderArea.extent.width = o->w; ri.renderArea.extent.height = o->h;
++        ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &ca;
++        vkCmdBeginRendering(s_cmd, &ri);
++    } else {
++        const VkFormat rf = o->fmt;
++        const VkImageView rv = o->ms_att;
++        const VkRenderPass rp = vk_get_render_pass(1, &rf, 0, ENG_DEPTH_FMT, (VkSampleCountFlagBits)s_ms_n, 1);
++        const VkFramebuffer fb = rp ? vk_get_framebuffer(rp, o->w, o->h, 1, &rv) : VK_NULL_HANDLE;
++        if (!rp || !fb) return;
++        VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
++        rbi.renderPass = rp; rbi.framebuffer = fb;
++        rbi.renderArea.extent.width = o->w; rbi.renderArea.extent.height = o->h;
++        vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
++    }
+     vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso);
+     VkViewport vp = { 0.0f, (float)o->h, (float)o->w, -(float)o->h, 0.0f, 1.0f };
+     VkRect2D sc = { { 0, 0 }, { o->w, o->h } };
+     vkCmdSetViewport(s_cmd, 0, 1, &vp);
+     vkCmdSetScissor(s_cmd, 0, 1, &sc);
+     vkCmdSetStencilReference(s_cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+-    vkCmdSetPrimitiveTopology(s_cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
++    if (s_use_dyn_topo) vkCmdSetPrimitiveTopology(s_cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+     EngSetDesc d; memset(&d, 0, sizeof d);
+     for (u32 u = 0; u < 16; u++) { d.fs_view[u] = null_view(0); d.fs_smp[u] = s_point_sampler; }
+     for (u32 u = 0; u < 4; u++) { d.vs_view[u] = null_view(0); d.vs_smp[u] = s_point_sampler; }
+@@ -289,7 +336,8 @@ static void eng_ms_refresh(u32 h)
+         vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 2, dyn);
+         vkCmdDraw(s_cmd, 3, 1, 0, 0);
+     }
+-    vkCmdEndRendering(s_cmd);
++    if (s_use_dyn_render) vkCmdEndRendering(s_cmd);
++    else vkCmdEndRenderPass(s_cmd);
+     s_bar_global = 1;
+     s_cur_pso = VK_NULL_HANDLE; s_cur_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+ }
+@@ -316,7 +364,7 @@ static void eng_ms_apply(int want)
+     for (u32 i = 0; i < s_obj_count; i++) eng_ms_drop(&s_obj[i]);
+     AcquireSRWLockExclusive(&s_pipe_lock);
+     for (u32 i = 0; i < s_pipe_count; i++)
+-        for (int k = 0; k < 3; k++) {
++        for (int k = 0; k < 6; k++) {
+             if (s_pipe[i].psoms[k]) vkDestroyPipeline(s_dev, s_pipe[i].psoms[k], NULL);
+             s_pipe[i].psoms[k] = VK_NULL_HANDLE; s_pipe[i].failedms[k] = 0;
+         }
+@@ -409,15 +457,16 @@ static void eng_encode_draw(const EngRecord* r)
+         ms = eng_ms_make(depth);
+         for (u32 k = 0; ms && k < nrt; k++) ms = eng_ms_make(r->rt[k]);
+     }
+-    VkPipeline pso = ms ? eng_pso_ms(r->pipeline, topo_class(r->topology))
+-                        : eng_pso_for(r->pipeline, topo_class(r->topology), !scaled);
++    const int pslot = eng_pipe_slot(r->topology);
++    VkPipeline pso = ms ? eng_pso_ms(r->pipeline, pslot)
++                        : eng_pso_for(r->pipeline, pslot, !scaled);
+     if (!pso) return;
+     /* A highlight-plane pipeline into one target while HDR is on: the plane
+      * as its second attachment, in a rendering instance of its own. */
+     u32 plane = 0;
+     if (!ms && nrt == 1 && s_hdr_on && s_hdr_highlights && s_pipe[r->pipeline - 1].hdr_plane) {
+         EngObj* t0 = eng_owner(r->rt[0]);
+-        const VkPipeline ph = t0 ? eng_pso_plane(r->pipeline, topo_class(r->topology), !scaled) : VK_NULL_HANDLE;
++        const VkPipeline ph = t0 ? eng_pso_plane(r->pipeline, pslot, !scaled) : VK_NULL_HANDLE;
+         if (ph && t0->w >= tw && t0->h >= th && eng_hdr_plane_ready((u32)(t0 - s_obj) + 1, t0->w, t0->h)) {
+             pso = ph; plane = 1;
+         }
+@@ -491,7 +540,7 @@ static void eng_encode_draw(const EngRecord* r)
+ 
+     if (pso != s_cur_pso) { vkCmdBindPipeline(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso); s_cur_pso = pso; s_cur_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM; }
+     const VkPrimitiveTopology topo = topo_vk(r->topology);
+-    if (topo != s_cur_topo) { vkCmdSetPrimitiveTopology(s_cmd, topo); s_cur_topo = topo; }
++    if (s_use_dyn_topo && topo != s_cur_topo) { vkCmdSetPrimitiveTopology(s_cmd, topo); s_cur_topo = topo; }
+     VkViewport vp; VkRect2D sc;
+     eng_vp_sc(r, scaled, tw, th, &vp, &sc);
+     vkCmdSetViewport(s_cmd, 0, 1, &vp);
+@@ -566,7 +615,7 @@ static void eng_present_pass(VkPipeline pso, u32 src_h, u32 dst_h)
+     vkCmdSetViewport(s_cmd, 0, 1, &vp);
+     vkCmdSetScissor(s_cmd, 0, 1, &sc);
+     vkCmdSetStencilReference(s_cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+-    vkCmdSetPrimitiveTopology(s_cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); s_cur_topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    if (s_use_dyn_topo) { vkCmdSetPrimitiveTopology(s_cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); s_cur_topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; }
+     EngSetDesc d; memset(&d, 0, sizeof d);
+     for (u32 u = 0; u < 16; u++) { d.fs_view[u] = null_view(0); d.fs_smp[u] = s_linear_sampler; }
+     for (u32 u = 0; u < 4; u++) { d.vs_view[u] = null_view(0); d.vs_smp[u] = s_point_sampler; }
+@@ -619,7 +668,7 @@ static void eng_encode_depth_resolve(const EngRecord* r)
+     vkCmdSetViewport(s_cmd, 0, 1, &vp);
+     vkCmdSetScissor(s_cmd, 0, 1, &sc);
+     vkCmdSetStencilReference(s_cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+-    vkCmdSetPrimitiveTopology(s_cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); s_cur_topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    if (s_use_dyn_topo) { vkCmdSetPrimitiveTopology(s_cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); s_cur_topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; }
+     EngSetDesc d; memset(&d, 0, sizeof d);
+     for (u32 u = 0; u < 16; u++) { d.fs_view[u] = null_view(0); d.fs_smp[u] = s_point_sampler; }
+     for (u32 u = 0; u < 4; u++) { d.vs_view[u] = null_view(0); d.vs_smp[u] = s_point_sampler; }
+@@ -929,19 +978,30 @@ static void eng_submit(u32 present_surface, int wait)
+     }
+ 
+     const u64 f = ++s_fence_value;
+-    VkSemaphore sig[2] = { s_timeline, presenting ? s_sem_done[img_index] : VK_NULL_HANDLE };
+-    const u64 sigv[2] = { f, 0 };
+-    VkTimelineSemaphoreSubmitInfo ts = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+-    ts.signalSemaphoreValueCount = presenting ? 2 : 1; ts.pSignalSemaphoreValues = sigv;
+-    const u64 waitv = 0;
+-    ts.waitSemaphoreValueCount = presenting ? 1 : 0; ts.pWaitSemaphoreValues = &waitv;
+-    VkPipelineStageFlags wstage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+-    si.pNext = &ts;
+-    si.waitSemaphoreCount = presenting ? 1 : 0; si.pWaitSemaphores = &s_sem_acq[s_slot]; si.pWaitDstStageMask = &wstage;
+-    si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
+-    si.signalSemaphoreCount = presenting ? 2 : 1; si.pSignalSemaphores = sig;
+-    const VkResult sr = vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE);
++    VkResult sr;
++    if (s_use_timeline) {
++        VkSemaphore sig[2] = { s_timeline, presenting ? s_sem_done[img_index] : VK_NULL_HANDLE };
++        const u64 sigv[2] = { f, 0 };
++        VkTimelineSemaphoreSubmitInfo ts = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
++        ts.signalSemaphoreValueCount = presenting ? 2 : 1; ts.pSignalSemaphoreValues = sigv;
++        const u64 waitv = 0;
++        ts.waitSemaphoreValueCount = presenting ? 1 : 0; ts.pWaitSemaphoreValues = &waitv;
++        VkPipelineStageFlags wstage = VK_PIPELINE_STAGE_TRANSFER_BIT;
++        VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++        si.pNext = &ts;
++        si.waitSemaphoreCount = presenting ? 1 : 0; si.pWaitSemaphores = &s_sem_acq[s_slot]; si.pWaitDstStageMask = &wstage;
++        si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
++        si.signalSemaphoreCount = presenting ? 2 : 1; si.pSignalSemaphores = sig;
++        sr = vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE);
++    } else {
++        VkPipelineStageFlags wstage = VK_PIPELINE_STAGE_TRANSFER_BIT;
++        VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++        si.waitSemaphoreCount = presenting ? 1 : 0; si.pWaitSemaphores = &s_sem_acq[s_slot]; si.pWaitDstStageMask = &wstage;
++        si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
++        si.signalSemaphoreCount = presenting ? 1 : 0; si.pSignalSemaphores = presenting ? &s_sem_done[img_index] : NULL;
++        VkFence fn = fence_alloc_slot(f);
++        sr = vkQueueSubmit(s_queue, 1, &si, fn);
++    }
+     if (sr != VK_SUCCESS) {
+         static int n = 0;
+         if (n < 8 && ++n) fprintf(stderr, "[rsx engine/vulkan] submit failed: %d\n", (int)sr);
+@@ -1027,12 +1087,18 @@ static void eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h, vo
+     s_cmd = saved;
+     vkEndCommandBuffer(s_aux_cmd);
+     const u64 f = ++s_fence_value;
+-    VkTimelineSemaphoreSubmitInfo ts = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+-    ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &f;
+-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+-    si.pNext = &ts; si.commandBufferCount = 1; si.pCommandBuffers = &s_aux_cmd;
+-    si.signalSemaphoreCount = 1; si.pSignalSemaphores = &s_timeline;
+-    vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE);
++    if (s_use_timeline) {
++        VkTimelineSemaphoreSubmitInfo ts = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
++        ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &f;
++        VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++        si.pNext = &ts; si.commandBufferCount = 1; si.pCommandBuffers = &s_aux_cmd;
++        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &s_timeline;
++        vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE);
++    } else {
++        VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++        si.commandBufferCount = 1; si.pCommandBuffers = &s_aux_cmd;
++        vkQueueSubmit(s_queue, 1, &si, fence_alloc_slot(f));
++    }
+     fence_wait(f);
+     const u8* p = mem_ptr(&s_rb_mem);
+     if (!p) return;
+@@ -1178,6 +1244,11 @@ static int eng_load_vulkan(void)
+     s_vk_dll = LoadLibraryA("vulkan-1.dll");
+     if (!s_vk_dll) { fprintf(stderr, "[RSX vulkan] vulkan-1.dll not found (no Vulkan driver)\n"); return -1; }
+     vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)(void*)GetProcAddress(s_vk_dll, "vkGetInstanceProcAddr");
++#elif defined(__ANDROID__)
++    s_vk_dll = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
++    if (!s_vk_dll) s_vk_dll = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
++    if (!s_vk_dll) { VK_LOGE("[RSX vulkan] libvulkan.so not found: %s", dlerror()); return -1; }
++    vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(s_vk_dll, "vkGetInstanceProcAddr");
+ #else
+     s_vk_dll = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+     if (!s_vk_dll) s_vk_dll = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+@@ -1294,7 +1365,10 @@ static int eng_swapchain_create(void)
+     ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+     ci.preTransform = caps.currentTransform;
+-    ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++    ci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
++                      : (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
++                      : (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
++                      : VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+     ci.presentMode = pm; ci.clipped = VK_TRUE;
+     ci.oldSwapchain = s_swap;
+     VkSwapchainKHR sw = VK_NULL_HANDLE;
+@@ -1344,7 +1418,7 @@ static VkPipeline eng_helper_pso(VkShaderModule ps, VkFormat rt)
+     p.vs = s_helper_vs; p.fs = ps; p.nattr = 0; p.stride = 16; p.rt_count = 1; p.rt_fmt = rt;
+     p.rs.color_mask = 0xFFFFFFFFu;
+     p.no_depth = 1;
+-    return eng_build_pso(&p, 2, ps);
++    return eng_build_pso(&p, eng_pipe_slot(RSX_TOPOLOGY_TRIANGLES), ps);
+ }
+ 
+ static int eng_init_device(void)
+@@ -1352,7 +1426,15 @@ static int eng_init_device(void)
+     if (eng_load_vulkan() != 0) return -1;
+     u32 api = VK_API_VERSION_1_0;
+     if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&api);
+-    if (api < VK_API_VERSION_1_3) { fprintf(stderr, "[RSX vulkan] the loader is Vulkan %u.%u; 1.3 is needed\n", VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api)); return -1; }
++    if (api < VK_API_VERSION_1_1) {
++        VK_LOGE("[RSX vulkan] the loader is Vulkan %u.%u; 1.1+ is needed", VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
++        return -1;
++    }
++    const u32 inst_api = api >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3
++                       : api >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2 : VK_API_VERSION_1_1;
++    VK_LOGI("[RSX vulkan] loader Vulkan %u.%u.%u (requesting %u.%u)",
++            VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
++            VK_API_VERSION_MAJOR(inst_api), VK_API_VERSION_MINOR(inst_api));
+ 
+     const char* exts[8]; u32 next = 0;
+ #ifdef _WIN32
+@@ -1391,7 +1473,7 @@ static int eng_init_device(void)
+         if (!nlay) fprintf(stderr, "[RSX vulkan] RSX_VK_VALIDATION: the validation layer is not installed\n");
+     }
+     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+-    app.pApplicationName = "ps3recomp"; app.pEngineName = "ps3recomp"; app.apiVersion = VK_API_VERSION_1_3;
++    app.pApplicationName = "ps3recomp"; app.pEngineName = "ps3recomp"; app.apiVersion = inst_api;
+     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+     ici.pApplicationInfo = &app;
+     ici.enabledExtensionCount = next; ici.ppEnabledExtensionNames = exts;
+@@ -1433,7 +1515,7 @@ static int eng_init_device(void)
+     int best = -1, best_score = -1; u32 best_q = 0;
+     for (u32 i = 0; i < nd; i++) {
+         VkPhysicalDeviceProperties pr; vkGetPhysicalDeviceProperties(devs[i], &pr);
+-        if (pr.apiVersion < VK_API_VERSION_1_3) continue;
++        if (pr.apiVersion < VK_API_VERSION_1_1) continue;
+         u32 nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(devs[i], &nq, NULL);
+         VkQueueFamilyProperties qp[16]; if (nq > 16) nq = 16;
+         vkGetPhysicalDeviceQueueFamilyProperties(devs[i], &nq, qp);
+@@ -1448,41 +1530,98 @@ static int eng_init_device(void)
+             break;
+         }
+     }
+-    if (best < 0) { fprintf(stderr, "[RSX vulkan] no Vulkan 1.3 device with a graphics queue\n"); return -1; }
++    if (best < 0) { VK_LOGE("[RSX vulkan] no Vulkan 1.1+ device with a graphics queue"); return -1; }
+     s_phys = devs[best]; s_qfam = best_q;
+     vkGetPhysicalDeviceProperties(s_phys, &s_props);
+     vkGetPhysicalDeviceMemoryProperties(s_phys, &s_memprops);
+-    fprintf(stderr, "[rsx engine/vulkan] device: %s (Vulkan %u.%u.%u)\n", s_props.deviceName,
++    s_dev_api_ver = s_props.apiVersion < inst_api ? s_props.apiVersion : inst_api;
++    VK_LOGI("[rsx engine/vulkan] device: %s (vendor 0x%04x, driver 0x%x, Vulkan %u.%u.%u)",
++            s_props.deviceName, s_props.vendorID, s_props.driverVersion,
+             VK_API_VERSION_MAJOR(s_props.apiVersion), VK_API_VERSION_MINOR(s_props.apiVersion), VK_API_VERSION_PATCH(s_props.apiVersion));
+-    {   VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(s_phys, ENG_DEPTH_FMT, &fp);
++    {
++        VkFormatProperties fp;
++        s_depth_fmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
++        vkGetPhysicalDeviceFormatProperties(s_phys, s_depth_fmt, &fp);
+         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+-            fprintf(stderr, "[RSX vulkan] D32_SFLOAT_S8_UINT depth is not supported\n"); return -1; } }
++            s_depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
++            vkGetPhysicalDeviceFormatProperties(s_phys, s_depth_fmt, &fp);
++            if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
++                VK_LOGE("[RSX vulkan] neither D32_SFLOAT_S8_UINT nor D24_UNORM_S8_UINT depth is supported");
++                return -1;
++            }
++            VK_LOGI("[rsx engine/vulkan] depth fallback: D24_UNORM_S8_UINT");
++        }
++    }
+ 
+     u32 ne = 0; vkEnumerateDeviceExtensionProperties(s_phys, NULL, &ne, NULL);
+     VkExtensionProperties* ep = (VkExtensionProperties*)calloc(ne ? ne : 1, sizeof *ep);
+     vkEnumerateDeviceExtensionProperties(s_phys, NULL, &ne, ep);
+-    const char* dext[4]; u32 ndext = 0;
++    const char* dext[16]; u32 ndext = 0;
+     if (!s_headless) dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
++    const int has_dyn_render_ext = has_ext(ep, ne, "VK_KHR_dynamic_rendering");
++    const int has_timeline_ext = has_ext(ep, ne, "VK_KHR_timeline_semaphore");
++    const int has_eds_ext = has_ext(ep, ne, "VK_EXT_extended_dynamic_state");
+     s_has_maint5 = has_ext(ep, ne, "VK_KHR_maintenance5");
+     if (s_has_maint5) dext[ndext++] = "VK_KHR_maintenance5";   /* point size 1 without the shader writing it */
++    const int use_ext_dyn_render = (s_dev_api_ver < VK_API_VERSION_1_3) && has_dyn_render_ext;
++    const int use_ext_timeline = (s_dev_api_ver < VK_API_VERSION_1_2) && has_timeline_ext;
++    const int use_ext_eds = (s_dev_api_ver < VK_API_VERSION_1_3) && has_eds_ext;
++    if (use_ext_dyn_render) {
++        dext[ndext++] = "VK_KHR_dynamic_rendering";
++        if (has_ext(ep, ne, "VK_KHR_depth_stencil_resolve")) dext[ndext++] = "VK_KHR_depth_stencil_resolve";
++        if (has_ext(ep, ne, "VK_KHR_create_renderpass2")) dext[ndext++] = "VK_KHR_create_renderpass2";
++    }
++    if (use_ext_timeline) dext[ndext++] = "VK_KHR_timeline_semaphore";
++    if (use_ext_eds) dext[ndext++] = "VK_EXT_extended_dynamic_state";
+     free(ep);
+ 
+     VkPhysicalDeviceVulkan13Features f13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+     VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
++    VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR };
++    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR fts = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR };
++    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT feds = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT };
+     VkPhysicalDeviceMaintenance5FeaturesKHR fm5 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR };
+     VkPhysicalDeviceFeatures2 f2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+-    f2.pNext = &f12; f12.pNext = &f13; f13.pNext = s_has_maint5 ? &fm5 : NULL;
++    void** pnext_q = &f2.pNext;
++    if (s_dev_api_ver >= VK_API_VERSION_1_2) { *pnext_q = &f12; pnext_q = &f12.pNext; }
++    else if (use_ext_timeline) { *pnext_q = &fts; pnext_q = &fts.pNext; }
++    if (s_dev_api_ver >= VK_API_VERSION_1_3) { *pnext_q = &f13; pnext_q = &f13.pNext; }
++    else {
++        if (use_ext_dyn_render) { *pnext_q = &fdr; pnext_q = &fdr.pNext; }
++        if (use_ext_eds) { *pnext_q = &feds; pnext_q = &feds.pNext; }
++    }
++    if (s_has_maint5) { *pnext_q = &fm5; pnext_q = &fm5.pNext; }
+     vkGetPhysicalDeviceFeatures2(s_phys, &f2);
+-    if (!f13.dynamicRendering || !f12.timelineSemaphore) { fprintf(stderr, "[RSX vulkan] dynamic rendering / timeline semaphores missing\n"); return -1; }
++
++    s_use_dyn_render = (s_dev_api_ver >= VK_API_VERSION_1_3) ? (f13.dynamicRendering != 0) : (use_ext_dyn_render && fdr.dynamicRendering);
++    s_use_timeline = (s_dev_api_ver >= VK_API_VERSION_1_2) ? (f12.timelineSemaphore != 0) : (use_ext_timeline && fts.timelineSemaphore);
++    s_use_dyn_topo = (s_dev_api_ver >= VK_API_VERSION_1_3) ? 1 : (use_ext_eds && feds.extendedDynamicState);
+ 
+     VkPhysicalDeviceVulkan13Features e13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+     VkPhysicalDeviceVulkan12Features e12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
++    VkPhysicalDeviceDynamicRenderingFeaturesKHR edr = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR };
++    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR ets = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR };
++    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eeds = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT };
+     VkPhysicalDeviceMaintenance5FeaturesKHR em5 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR };
+     VkPhysicalDeviceFeatures2 e2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+-    e2.pNext = &e12; e12.pNext = &e13; e13.pNext = (s_has_maint5 && fm5.maintenance5) ? &em5 : NULL;
+-    e13.dynamicRendering = VK_TRUE;
+-    e12.timelineSemaphore = VK_TRUE;
+-    e12.samplerMirrorClampToEdge = f12.samplerMirrorClampToEdge;
+-    em5.maintenance5 = fm5.maintenance5;
++    void** pnext_e = &e2.pNext;
++    if (s_dev_api_ver >= VK_API_VERSION_1_2) {
++        e12.timelineSemaphore = s_use_timeline ? VK_TRUE : VK_FALSE;
++        e12.samplerMirrorClampToEdge = f12.samplerMirrorClampToEdge;
++        *pnext_e = &e12; pnext_e = &e12.pNext;
++    } else if (s_use_timeline) {
++        ets.timelineSemaphore = VK_TRUE;
++        *pnext_e = &ets; pnext_e = &ets.pNext;
++    }
++    if (s_dev_api_ver >= VK_API_VERSION_1_3) {
++        e13.dynamicRendering = s_use_dyn_render ? VK_TRUE : VK_FALSE;
++        *pnext_e = &e13; pnext_e = &e13.pNext;
++    } else {
++        if (s_use_dyn_render) { edr.dynamicRendering = VK_TRUE; *pnext_e = &edr; pnext_e = &edr.pNext; }
++        if (s_use_dyn_topo) { eeds.extendedDynamicState = VK_TRUE; *pnext_e = &eeds; pnext_e = &eeds.pNext; }
++    }
++    if (s_has_maint5 && fm5.maintenance5) { em5.maintenance5 = VK_TRUE; *pnext_e = &em5; pnext_e = &em5.pNext; }
++
+     e2.features.textureCompressionBC = f2.features.textureCompressionBC;
+     e2.features.occlusionQueryPrecise = f2.features.occlusionQueryPrecise;
+     s_query_precise = f2.features.occlusionQueryPrecise ? 1 : 0;
+@@ -1500,14 +1639,33 @@ static int eng_init_device(void)
+ #define VK_LOAD_D(n) n = (PFN_##n)vkGetDeviceProcAddr(s_dev, #n);
+     VK_DEVICE_FNS(VK_LOAD_D)
+ #undef VK_LOAD_D
++    if (s_use_dyn_render) {
++        vkCmdBeginRendering = (PFN_vkCmdBeginRendering)vkGetDeviceProcAddr(s_dev, s_dev_api_ver >= VK_API_VERSION_1_3 ? "vkCmdBeginRendering" : "vkCmdBeginRenderingKHR");
++        vkCmdEndRendering = (PFN_vkCmdEndRendering)vkGetDeviceProcAddr(s_dev, s_dev_api_ver >= VK_API_VERSION_1_3 ? "vkCmdEndRendering" : "vkCmdEndRenderingKHR");
++        if (!vkCmdBeginRendering || !vkCmdEndRendering) s_use_dyn_render = 0;
++    }
++    if (s_use_timeline) {
++        vkWaitSemaphores = (PFN_vkWaitSemaphores)vkGetDeviceProcAddr(s_dev, s_dev_api_ver >= VK_API_VERSION_1_2 ? "vkWaitSemaphores" : "vkWaitSemaphoresKHR");
++        vkGetSemaphoreCounterValue = (PFN_vkGetSemaphoreCounterValue)vkGetDeviceProcAddr(s_dev, s_dev_api_ver >= VK_API_VERSION_1_2 ? "vkGetSemaphoreCounterValue" : "vkGetSemaphoreCounterValueKHR");
++        if (!vkWaitSemaphores || !vkGetSemaphoreCounterValue) s_use_timeline = 0;
++    }
++    if (s_use_dyn_topo) {
++        vkCmdSetPrimitiveTopology = (PFN_vkCmdSetPrimitiveTopology)vkGetDeviceProcAddr(s_dev, s_dev_api_ver >= VK_API_VERSION_1_3 ? "vkCmdSetPrimitiveTopology" : "vkCmdSetPrimitiveTopologyEXT");
++        if (!vkCmdSetPrimitiveTopology) s_use_dyn_topo = 0;
++    }
++    rsx_spirv_set_target(s_dev_api_ver);
++    VK_LOGI("[rsx engine/vulkan] caps: dyn_render=%d timeline=%d dyn_topo=%d bc=%d",
++            s_use_dyn_render, s_use_timeline, s_use_dyn_topo, (int)f2.features.textureCompressionBC);
+     vkGetDeviceQueue(s_dev, s_qfam, 0, &s_queue);
+ 
+-    /* The timeline, the per-slot pools, query pools and semaphores. */
+-    VkSemaphoreTypeCreateInfo st = { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+-    st.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+-    VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+-    sci.pNext = &st;
+-    VKCHECK(vkCreateSemaphore(s_dev, &sci, NULL, &s_timeline), "timeline semaphore");
++    /* The timeline (if available), the per-slot pools, query pools and semaphores. */
++    if (s_use_timeline) {
++        VkSemaphoreTypeCreateInfo st = { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
++        st.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
++        VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
++        sci.pNext = &st;
++        VKCHECK(vkCreateSemaphore(s_dev, &sci, NULL, &s_timeline), "timeline semaphore");
++    }
+     VkCommandPoolCreateInfo cpi = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+     cpi.queueFamilyIndex = s_qfam; cpi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+     VkDescriptorPoolSize ps[3] = {
+@@ -1591,12 +1749,18 @@ static int eng_init_device(void)
+         bar_flush();
+         vkEndCommandBuffer(s_aux_cmd);
+         const u64 f = ++s_fence_value;
+-        VkTimelineSemaphoreSubmitInfo ts = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+-        ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &f;
+-        VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+-        si.pNext = &ts; si.commandBufferCount = 1; si.pCommandBuffers = &s_aux_cmd;
+-        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &s_timeline;
+-        VKCHECK(vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE), "init submit");
++        if (s_use_timeline) {
++            VkTimelineSemaphoreSubmitInfo ts = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
++            ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &f;
++            VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++            si.pNext = &ts; si.commandBufferCount = 1; si.pCommandBuffers = &s_aux_cmd;
++            si.signalSemaphoreCount = 1; si.pSignalSemaphores = &s_timeline;
++            VKCHECK(vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE), "init submit");
++        } else {
++            VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++            si.commandBufferCount = 1; si.pCommandBuffers = &s_aux_cmd;
++            VKCHECK(vkQueueSubmit(s_queue, 1, &si, fence_alloc_slot(f)), "init submit");
++        }
+         fence_wait(f);
+     }
+ 
+@@ -1661,9 +1825,10 @@ static void eng_shutdown(void* user)
+     for (u32 i = 0; i < s_obj_count; i++) if (s_obj[i].kind) eng_obj_destroy(&s_obj[i]);
+     s_obj_count = s_obj_free_count = s_retired_count = 0;
+     for (u32 i = 0; i < s_pipe_count; i++) {
+-        for (int k = 0; k < 3; k++) {
++        for (int k = 0; k < 6; k++) {
+             if (s_pipe[i].pso[k]) vkDestroyPipeline(s_dev, s_pipe[i].pso[k], NULL);
+             if (s_pipe[i].pso1[k]) vkDestroyPipeline(s_dev, s_pipe[i].pso1[k], NULL);
++            if (s_pipe[i].psoms[k]) vkDestroyPipeline(s_dev, s_pipe[i].psoms[k], NULL);
+             if (s_pipe[i].psoh[k]) vkDestroyPipeline(s_dev, s_pipe[i].psoh[k], NULL);
+         }
+         free(s_pipe[i].ps_plain);
+@@ -1712,6 +1877,13 @@ static void eng_release_device(void)
+         for (int i = 0; i < 8; i++) if (s_sem_done[i]) vkDestroySemaphore(s_dev, s_sem_done[i], NULL);
+         if (s_aux_pool) vkDestroyCommandPool(s_dev, s_aux_pool, NULL);
+         if (s_timeline) vkDestroySemaphore(s_dev, s_timeline, NULL);
++        s_timeline = VK_NULL_HANDLE;
++        for (int i = 0; i < FENCE_RING_SIZE; i++) {
++            if (s_fences[i].fence) vkDestroyFence(s_dev, s_fences[i].fence, NULL);
++            s_fences[i].fence = VK_NULL_HANDLE; s_fences[i].active = 0; s_fences[i].val = 0;
++        }
++        s_fence_done_val = 0;
++        vk_clear_rp_fb_cache();
+         if (s_swap) vkDestroySwapchainKHR(s_dev, s_swap, NULL);
+         for (u32 b = 0; b < s_nblk; b++) if (s_blk[b].mem) { vkFreeMemory(s_dev, s_blk[b].mem, NULL); free(s_blk[b].fr); }
+         memset(s_blk, 0, sizeof s_blk); s_nblk = 0;
+@@ -1822,7 +1994,7 @@ static void eng_rescale(void)
+         VkShaderModule fs = eng_fp_module(p->ps_plain);   /* cached modules: not destroyed */
+         if (!fs) continue;
+         p->fs = fs;
+-        for (int k = 0; k < 3; k++) {
++        for (int k = 0; k < 6; k++) {
+             if (p->pso[k]) vkDestroyPipeline(s_dev, p->pso[k], NULL);
+             p->pso[k] = VK_NULL_HANDLE; p->failed[k] = 0;
+             if (p->psoh[k]) vkDestroyPipeline(s_dev, p->psoh[k], NULL);
+diff --git a/libs/video/rsx_vulkan_engine.c b/libs/video/rsx_vulkan_engine.c
+index 5f16c4a..a4f402e 100644
+--- a/libs/video/rsx_vulkan_engine.c
++++ b/libs/video/rsx_vulkan_engine.c
+@@ -66,6 +66,14 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef __ANDROID__
++#include <android/log.h>
++#define VK_LOGI(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); __android_log_print(ANDROID_LOG_INFO, "Dod3Android", __VA_ARGS__); } while (0)
++#define VK_LOGE(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); __android_log_print(ANDROID_LOG_ERROR, "Dod3Android", __VA_ARGS__); } while (0)
++#else
++#define VK_LOGI(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
++#define VK_LOGE(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
++#endif
+ 
+ #include "rsx_draw_engine.h"
+ #include "rsx_texture_layout.h"
+@@ -84,6 +92,15 @@
+ #define ENG_MAX_SAMPLERS  256
+ #define ENG_MAX_BUFS      16384
+ #define ENG_ALIGN         256u
++#ifdef __ANDROID__
++#define ENG_STAGE_MAX     (128u << 20)
++#define ENG_STAGE_CHUNK   (8u << 20)
++#define ENG_UBO_RANGE     16384u      /* both constant blocks; the stage keeps this much slack */
++#define ENG_FRAMES        4
++#define ENG_INFLIGHT      2
++#define ENG_SETS_PER_SLOT 4096u
++#define ENG_QUERIES_PER_SLOT 4096u
++#else
+ #define ENG_STAGE_MAX     (384u << 20)
+ #define ENG_STAGE_CHUNK   (16u << 20)
+ #define ENG_UBO_RANGE     16384u      /* both constant blocks; the stage keeps this much slack */
+@@ -91,13 +108,15 @@
+ #define ENG_INFLIGHT      2
+ #define ENG_SETS_PER_SLOT 16384u
+ #define ENG_QUERIES_PER_SLOT 16384u
++#endif
+ #define ENG_VIS_SLOTS     16384u
+ #define ENG_MAX_REPORTS   4096
+ #define ENG_MAX_SUBMITS   16
+ #define ENG_STAGE_POOL    64
+ #define ENG_STAGE_KEEP    8           /* chunks kept however long they go unused */
+ #define ENG_STAGE_IDLE    600u        /* submits a chunk beyond those is kept unused */
+-#define ENG_DEPTH_FMT     VK_FORMAT_D32_SFLOAT_S8_UINT
++static VkFormat s_depth_fmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
++#define ENG_DEPTH_FMT     s_depth_fmt
+ 
+ /* ---- the loader ------------------------------------------------------------ */
+ 
+@@ -124,7 +143,10 @@
+     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) \
+     X(vkQueuePresentKHR) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkResetCommandPool) \
+     X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCreateSemaphore) \
+-    X(vkDestroySemaphore) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkAllocateMemory) \
++    X(vkDestroySemaphore) X(vkCreateFence) X(vkDestroyFence) X(vkResetFences) \
++    X(vkGetFenceStatus) X(vkWaitForFences) X(vkCreateRenderPass) X(vkDestroyRenderPass) \
++    X(vkCreateFramebuffer) X(vkDestroyFramebuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) \
++    X(vkAllocateMemory) \
+     X(vkFreeMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCreateBuffer) X(vkDestroyBuffer) \
+     X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) X(vkCreateImage) X(vkDestroyImage) \
+     X(vkGetImageMemoryRequirements) X(vkBindImageMemory) X(vkCreateImageView) X(vkDestroyImageView) \
+@@ -133,14 +155,21 @@
+     X(vkDestroyDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
+     X(vkResetDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
+     X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) X(vkCreateQueryPool) X(vkDestroyQueryPool) \
+-    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage) \
++    X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage) \
+     X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdBlitImage) X(vkCmdClearColorImage) \
+     X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) X(vkCmdBindPipeline) \
+     X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdDraw) \
+     X(vkCmdDrawIndexed) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetStencilReference) \
+-    X(vkCmdSetPrimitiveTopology) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdResetQueryPool) \
++    X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdResetQueryPool) \
+     X(vkCmdCopyQueryPoolResults)
+ 
++/* Extension / core-promoted functions loaded dynamically depending on Vulkan 1.1 / 1.2 / 1.3 */
++static PFN_vkWaitSemaphores vkWaitSemaphores;
++static PFN_vkGetSemaphoreCounterValue vkGetSemaphoreCounterValue;
++static PFN_vkCmdBeginRendering vkCmdBeginRendering;
++static PFN_vkCmdEndRendering vkCmdEndRendering;
++static PFN_vkCmdSetPrimitiveTopology vkCmdSetPrimitiveTopology;
++
+ #ifdef _WIN32
+ static HMODULE s_vk_dll;
+ #else
+@@ -219,9 +248,9 @@ typedef struct {
+ typedef struct {
+     VkShaderModule vs, fs, fs1;           /* fs1: WPOS undivided (see eng_pso_for) */
+     char* ps_plain;
+-    VkPipeline pso[3], pso1[3];
+-    VkPipeline psoms[3]; int failedms[3];   /* the MSAA build (s_ms_n samples) */
+-    int failed[3], failed1[3];
++    VkPipeline pso[6], pso1[6];
++    VkPipeline psoms[6]; int failedms[6];   /* the MSAA build (s_ms_n samples) */
++    int failed[6], failed1[6];
+     rsx_be_render_state rs;
+     u32 nattr, stride, rt_count;
+     VkFormat rt_fmt;
+@@ -232,7 +261,7 @@ typedef struct {
+      * highlight plane at its second output (eng_hdr_plane_*): the build with
+      * that second attachment, for a pass into one target while HDR is on. */
+     int hdr_plane;
+-    VkPipeline psoh[3]; int failedh[3];
++    VkPipeline psoh[6]; int failedh[6];
+ } EngPipeline;
+ 
+ typedef struct { u64 hash; VkShaderModule mod; } EngModule;
+@@ -329,6 +358,35 @@ static VkShaderModule s_helper_vs, s_helper_ps_depth, s_helper_ps_pack;
+ static SRWLOCK s_pipe_lock = SRWLOCK_INIT;
+ static SRWLOCK s_mem_lock = SRWLOCK_INIT;
+ static int s_has_maint5, s_query_precise;
++static int s_use_dyn_render = 1, s_use_timeline = 1, s_use_dyn_topo = 1;
++static u32 s_dev_api_ver = VK_API_VERSION_1_3;
++
++/* VkFence ring fallback for Vulkan 1.1 devices without timeline semaphores */
++#define FENCE_RING_SIZE 64
++typedef struct { VkFence fence; u64 val; int active; } FenceSlot;
++static FenceSlot s_fences[FENCE_RING_SIZE];
++static u64 s_fence_done_val;
++
++/* VkRenderPass + VkFramebuffer caches for Vulkan 1.1/1.2 without dynamic rendering */
++#define RP_CACHE_MAX 128
++#define FB_CACHE_MAX 256
++typedef struct {
++    u32 nrt;
++    VkFormat rt_fmt[RSX_BE_MAX_COLOR_TARGETS];
++    int has_depth;
++    VkFormat depth_fmt;
++    VkSampleCountFlagBits samples;
++    int dont_care;
++    VkRenderPass rp;
++} EngRpEntry;
++typedef struct {
++    VkRenderPass rp;
++    u32 w, h, natt;
++    VkImageView views[RSX_BE_MAX_COLOR_TARGETS * 2 + 1];
++    VkFramebuffer fb;
++} EngFbEntry;
++static EngRpEntry s_rp_cache[RP_CACHE_MAX]; static u32 s_rp_count;
++static EngFbEntry s_fb_cache[FB_CACHE_MAX]; static u32 s_fb_count;
+ 
+ static VkCommandBuffer s_cmd; static u32 s_slot;
+ static EngObj s_obj[ENG_MAX_OBJECTS];
+@@ -580,6 +638,32 @@ static int topo_class(rsx_topology t)
+     default: return 2;
+     }
+ }
++static int eng_pipe_slot(rsx_topology t)
++{
++    if (s_use_dyn_topo) return topo_class(t);
++    switch (t) {
++    case RSX_TOPOLOGY_POINTS:         return 0;
++    case RSX_TOPOLOGY_LINES:          return 1;
++    case RSX_TOPOLOGY_LINE_STRIP:     return 2;
++    case RSX_TOPOLOGY_TRIANGLE_STRIP: return 4;
++    default:                          return 3;
++    }
++}
++static VkPrimitiveTopology eng_slot_topo(int cls)
++{
++    if (s_use_dyn_topo) {
++        return cls == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
++             : cls == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
++                        : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    }
++    switch (cls) {
++    case 0:  return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
++    case 1:  return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
++    case 2:  return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
++    case 4:  return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++    default: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    }
++}
+ 
+ /* ---- memory ------------------------------------------------------------------ *
+  * Blocks of device memory, sub-allocated first fit with a sorted free list.
+@@ -731,9 +815,50 @@ static VkBuffer make_buffer(VkDeviceSize bytes, VkBufferUsageFlags usage, VkMemo
+ /* ---- timeline ---------------------------------------------------------------- */
+ 
+ extern double g_rsx_frame_gpu_wait_ms;   /* rsx_draw_engine.c */
++static void fence_poll_ring(void)
++{
++    for (int i = 0; i < FENCE_RING_SIZE; i++) {
++        if (!s_fences[i].active) continue;
++        if (vkGetFenceStatus(s_dev, s_fences[i].fence) == VK_SUCCESS) {
++            if (s_fences[i].val > s_fence_done_val) s_fence_done_val = s_fences[i].val;
++            s_fences[i].active = 0;
++        }
++    }
++}
++static VkFence fence_alloc_slot(u64 v)
++{
++    for (int i = 0; i < FENCE_RING_SIZE; i++) {
++        if (!s_fences[i].active) {
++            if (!s_fences[i].fence) {
++                VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++                if (vkCreateFence(s_dev, &fi, NULL, &s_fences[i].fence) != VK_SUCCESS) return VK_NULL_HANDLE;
++            } else {
++                vkResetFences(s_dev, 1, &s_fences[i].fence);
++            }
++            s_fences[i].val = v;
++            s_fences[i].active = 1;
++            return s_fences[i].fence;
++        }
++    }
++    /* Ring full: wait on oldest active fence */
++    int oldest = 0;
++    for (int i = 1; i < FENCE_RING_SIZE; i++)
++        if (s_fences[i].val < s_fences[oldest].val) oldest = i;
++    vkWaitForFences(s_dev, 1, &s_fences[oldest].fence, VK_TRUE, 2000000000ull);
++    if (s_fences[oldest].val > s_fence_done_val) s_fence_done_val = s_fences[oldest].val;
++    vkResetFences(s_dev, 1, &s_fences[oldest].fence);
++    s_fences[oldest].val = v;
++    s_fences[oldest].active = 1;
++    return s_fences[oldest].fence;
++}
+ static int fence_done(u64 v)
+ {
+     if (!v) return 1;
++    if (!s_use_timeline) {
++        if (s_fence_done_val >= v) return 1;
++        fence_poll_ring();
++        return s_fence_done_val >= v;
++    }
+     u64 cur = 0;
+     vkGetSemaphoreCounterValue(s_dev, s_timeline, &cur);
+     return cur >= v;
+@@ -742,6 +867,35 @@ static void fence_wait(u64 v)
+ {
+     if (fence_done(v)) return;
+     LARGE_INTEGER qf, q0, q1; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
++    if (!s_use_timeline) {
++        for (int tries = 0; tries < 5; tries++) {
++            VkFence wait_list[FENCE_RING_SIZE];
++            u32 cnt = 0;
++            u64 max_v = 0;
++            for (int i = 0; i < FENCE_RING_SIZE; i++) {
++                if (s_fences[i].active && s_fences[i].val <= v) {
++                    wait_list[cnt++] = s_fences[i].fence;
++                    if (s_fences[i].val > max_v) max_v = s_fences[i].val;
++                }
++            }
++            if (!cnt) {
++                QueryPerformanceCounter(&q1);
++                g_rsx_frame_gpu_wait_ms += (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)qf.QuadPart;
++                return;
++            }
++            const VkResult r = vkWaitForFences(s_dev, cnt, wait_list, VK_TRUE, 2000000000ull);
++            if (r == VK_SUCCESS) {
++                fence_poll_ring();
++                if (max_v > s_fence_done_val) s_fence_done_val = max_v;
++                QueryPerformanceCounter(&q1);
++                g_rsx_frame_gpu_wait_ms += (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)qf.QuadPart;
++                return;
++            }
++            VK_LOGE("[rsx engine/vulkan] fence submit %llu stuck %ds (result %d)", (unsigned long long)v, 2 * (tries + 1), (int)r);
++            if (r == VK_ERROR_DEVICE_LOST) { s_ready = 0; return; }
++        }
++        return;
++    }
+     VkSemaphoreWaitInfo wi = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+     wi.semaphoreCount = 1; wi.pSemaphores = &s_timeline; wi.pValues = &v;
+     for (int tries = 0; tries < 5; tries++) {
+@@ -756,6 +910,151 @@ static void fence_wait(u64 v)
+     }
+ }
+ 
++/* ---- RenderPass & Framebuffer cache (Vulkan 1.1/1.2 fallback) ---------------- */
++
++static VkRenderPass vk_get_render_pass(u32 nrt, const VkFormat* rt_fmts, int has_depth,
++                                       VkFormat depth_fmt, VkSampleCountFlagBits samples, int dont_care)
++{
++    for (u32 i = 0; i < s_rp_count; i++) {
++        const EngRpEntry* e = &s_rp_cache[i];
++        if (e->nrt != nrt || e->has_depth != has_depth || e->samples != samples || e->dont_care != dont_care) continue;
++        if (has_depth && e->depth_fmt != depth_fmt) continue;
++        int match = 1;
++        for (u32 k = 0; k < nrt; k++) if (e->rt_fmt[k] != rt_fmts[k]) { match = 0; break; }
++        if (match) return e->rp;
++    }
++    if (s_rp_count >= RP_CACHE_MAX) return VK_NULL_HANDLE;
++    const int ms = (samples > VK_SAMPLE_COUNT_1_BIT);
++    VkAttachmentDescription atts[RSX_BE_MAX_COLOR_TARGETS * 2 + 1];
++    VkAttachmentReference col_refs[RSX_BE_MAX_COLOR_TARGETS];
++    VkAttachmentReference res_refs[RSX_BE_MAX_COLOR_TARGETS];
++    VkAttachmentReference depth_ref = { 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
++    u32 natt = 0;
++    const VkAttachmentLoadOp color_load = dont_care ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD;
++    for (u32 k = 0; k < nrt; k++) {
++        VkAttachmentDescription* a = &atts[natt];
++        memset(a, 0, sizeof *a);
++        a->format = rt_fmts[k];
++        a->samples = samples;
++        a->loadOp = color_load;
++        a->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++        a->stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++        a->stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++        a->initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++        a->finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++        col_refs[k].attachment = natt++;
++        col_refs[k].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++    }
++    if (ms) {
++        for (u32 k = 0; k < nrt; k++) {
++            VkAttachmentDescription* a = &atts[natt];
++            memset(a, 0, sizeof *a);
++            a->format = rt_fmts[k];
++            a->samples = VK_SAMPLE_COUNT_1_BIT;
++            a->loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++            a->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++            a->stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
++            a->stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
++            a->initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++            a->finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++            res_refs[k].attachment = natt++;
++            res_refs[k].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++        }
++    }
++    if (has_depth) {
++        VkAttachmentDescription* a = &atts[natt];
++        memset(a, 0, sizeof *a);
++        a->format = depth_fmt;
++        a->samples = samples;
++        a->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++        a->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++        a->stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++        a->stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
++        a->initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
++        a->finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
++        depth_ref.attachment = natt++;
++    }
++    VkSubpassDescription sub = {0};
++    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++    sub.colorAttachmentCount = nrt;
++    sub.pColorAttachments = nrt ? col_refs : NULL;
++    sub.pResolveAttachments = (ms && nrt) ? res_refs : NULL;
++    sub.pDepthStencilAttachment = has_depth ? &depth_ref : NULL;
++    VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
++    rpci.attachmentCount = natt;
++    rpci.pAttachments = atts;
++    rpci.subpassCount = 1;
++    rpci.pSubpasses = &sub;
++    VkRenderPass rp = VK_NULL_HANDLE;
++    if (vkCreateRenderPass(s_dev, &rpci, NULL, &rp) != VK_SUCCESS) return VK_NULL_HANDLE;
++    EngRpEntry* e = &s_rp_cache[s_rp_count++];
++    memset(e, 0, sizeof *e);
++    e->nrt = nrt;
++    for (u32 k = 0; k < nrt; k++) e->rt_fmt[k] = rt_fmts[k];
++    e->has_depth = has_depth;
++    e->depth_fmt = depth_fmt;
++    e->samples = samples;
++    e->dont_care = dont_care;
++    e->rp = rp;
++    return rp;
++}
++
++static VkFramebuffer vk_get_framebuffer(VkRenderPass rp, u32 w, u32 h, u32 natt, const VkImageView* views)
++{
++    for (u32 i = 0; i < s_fb_count; i++) {
++        const EngFbEntry* e = &s_fb_cache[i];
++        if (e->rp != rp || e->w != w || e->h != h || e->natt != natt) continue;
++        if (memcmp(e->views, views, natt * sizeof(VkImageView)) == 0) return e->fb;
++    }
++    if (s_fb_count >= FB_CACHE_MAX) {
++        vkDestroyFramebuffer(s_dev, s_fb_cache[0].fb, NULL);
++        memmove(&s_fb_cache[0], &s_fb_cache[1], (s_fb_count - 1) * sizeof(EngFbEntry));
++        s_fb_count--;
++    }
++    VkFramebufferCreateInfo fci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
++    fci.renderPass = rp;
++    fci.attachmentCount = natt;
++    fci.pAttachments = views;
++    fci.width = w;
++    fci.height = h;
++    fci.layers = 1;
++    VkFramebuffer fb = VK_NULL_HANDLE;
++    if (vkCreateFramebuffer(s_dev, &fci, NULL, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
++    EngFbEntry* e = &s_fb_cache[s_fb_count++];
++    memset(e, 0, sizeof *e);
++    e->rp = rp; e->w = w; e->h = h; e->natt = natt;
++    memcpy(e->views, views, natt * sizeof(VkImageView));
++    e->fb = fb;
++    return fb;
++}
++
++static void vk_invalidate_view_fb(VkImageView view)
++{
++    if (!view) return;
++    u32 dst = 0;
++    for (u32 i = 0; i < s_fb_count; i++) {
++        int hit = 0;
++        for (u32 k = 0; k < s_fb_cache[i].natt; k++) {
++            if (s_fb_cache[i].views[k] == view) { hit = 1; break; }
++        }
++        if (hit) {
++            if (s_fb_cache[i].fb) vkDestroyFramebuffer(s_dev, s_fb_cache[i].fb, NULL);
++        } else {
++            if (dst != i) s_fb_cache[dst] = s_fb_cache[i];
++            dst++;
++        }
++    }
++    s_fb_count = dst;
++}
++
++static void vk_clear_rp_fb_cache(void)
++{
++    for (u32 i = 0; i < s_fb_count; i++) if (s_fb_cache[i].fb) vkDestroyFramebuffer(s_dev, s_fb_cache[i].fb, NULL);
++    s_fb_count = 0;
++    for (u32 i = 0; i < s_rp_count; i++) if (s_rp_cache[i].rp) vkDestroyRenderPass(s_dev, s_rp_cache[i].rp, NULL);
++    s_rp_count = 0;
++}
++
+ /* ---- object table ------------------------------------------------------------ */
+ 
+ static EngObj* eng_obj(u32 handle)
+@@ -841,10 +1140,10 @@ static u32 eng_image(EngObjKind kind, VkFormat fmt, u32 w, u32 h, u32 mips, u32
+ 
+ static void eng_obj_destroy(EngObj* o)
+ {
+-    if (o->ms_att) vkDestroyImageView(s_dev, o->ms_att, NULL);
++    if (o->ms_att) { vk_invalidate_view_fb(o->ms_att); vkDestroyImageView(s_dev, o->ms_att, NULL); }
+     if (o->ms_img) { vkDestroyImage(s_dev, o->ms_img, NULL); mem_free(&o->ms_mem); }
+-    if (o->view) vkDestroyImageView(s_dev, o->view, NULL);
+-    if (o->att) vkDestroyImageView(s_dev, o->att, NULL);
++    if (o->view) { vk_invalidate_view_fb(o->view); vkDestroyImageView(s_dev, o->view, NULL); }
++    if (o->att) { vk_invalidate_view_fb(o->att); vkDestroyImageView(s_dev, o->att, NULL); }
+     if (o->img) vkDestroyImage(s_dev, o->img, NULL);
+     mem_free(&o->mem);
+     memset(o, 0, sizeof *o);
+@@ -1160,11 +1459,15 @@ static SDL_Window* eng_create_window(u32 width, u32 height, const char* title)
+ {
+     if (!eng_sdl_video()) return NULL;
+     SDL_DisableScreenSaver();   /* SetThreadExecutionState's counterpart */
++#ifdef __ANDROID__
++    Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN;
++#else
+     Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI;
+     flags |= s_display != DISP_WINDOWED ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_RESIZABLE;
++#endif
+     SDL_Window* w = SDL_CreateWindow(title ? title : "ps3recomp (Vulkan)", SDL_WINDOWPOS_CENTERED,
+                                      SDL_WINDOWPOS_CENTERED, (int)width, (int)height, flags);
+-    if (!w) fprintf(stderr, "[RSX vulkan] SDL_CreateWindow: %s\n", SDL_GetError());
++    if (!w) VK_LOGE("[RSX vulkan] SDL_CreateWindow: %s", SDL_GetError());
+     else s_focused = (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS) != 0;
+     return w;
+ }
+@@ -1324,8 +1627,7 @@ static VkPipeline eng_build_pso(EngPipeline* p, int cls, VkShaderModule fs)
+     vi.vertexAttributeDescriptionCount = p->nattr; vi.pVertexAttributeDescriptions = va;
+ 
+     VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+-    ia.topology = cls == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : cls == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+-                                                                   : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    ia.topology = eng_slot_topo(cls);
+     VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+     vps.viewportCount = 1; vps.scissorCount = 1;
+ 
+@@ -1396,15 +1698,23 @@ static VkPipeline eng_build_pso(EngPipeline* p, int cls, VkShaderModule fs)
+     VkDynamicState dyn[4] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                               VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY };
+     VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+-    dy.dynamicStateCount = 4; dy.pDynamicStates = dyn;
++    dy.dynamicStateCount = s_use_dyn_topo ? 4u : 3u; dy.pDynamicStates = dyn;
+ 
+     VkPipelineRenderingCreateInfo ri = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+     ri.colorAttachmentCount = natt; ri.pColorAttachmentFormats = fmts;
+     ri.depthAttachmentFormat = p->no_depth ? VK_FORMAT_UNDEFINED : ENG_DEPTH_FMT;
+     ri.stencilAttachmentFormat = ri.depthAttachmentFormat;
+ 
++    VkRenderPass compat_rp = VK_NULL_HANDLE;
++    if (!s_use_dyn_render) {
++        compat_rp = vk_get_render_pass(natt, fmts, !p->no_depth, ENG_DEPTH_FMT, s_build_samples, 0);
++        if (!compat_rp) return VK_NULL_HANDLE;
++    }
++
+     VkGraphicsPipelineCreateInfo gi = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+-    gi.pNext = &ri;
++    gi.pNext = s_use_dyn_render ? (const void*)&ri : NULL;
++    gi.renderPass = compat_rp;
++    gi.subpass = 0;
+     gi.stageCount = 2; gi.pStages = st;
+     gi.pVertexInputState = &vi; gi.pInputAssemblyState = &ia; gi.pViewportState = &vps;
+     gi.pRasterizationState = &rz; gi.pMultisampleState = &ms; gi.pDepthStencilState = &ds;
+@@ -1494,7 +1804,7 @@ static u32 eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_h
+      * first draw on the walker (RSX_PSO_PREWARM=0: on first use). */
+     { static int warm = -1;
+       if (warm < 0) { const char* e = getenv("RSX_PSO_PREWARM"); warm = !(e && e[0] == '0'); }
+-      if (h && warm) eng_pso_for(h, 2, 0); }
++      if (h && warm) eng_pso_for(h, eng_pipe_slot(RSX_TOPOLOGY_TRIANGLES), 0); }
+     return h;
+ }
+ static void eng_pipeline_release(void* user, u32 pipeline)
+@@ -1948,6 +2258,14 @@ static void eng_clear_depth_stencil_rect(void* user, u32 depth, u32 flags, float
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef __ANDROID__
++#include <android/log.h>
++#define VK_LOGI(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); __android_log_print(ANDROID_LOG_INFO, "Dod3Android", __VA_ARGS__); } while (0)
++#define VK_LOGE(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); __android_log_print(ANDROID_LOG_ERROR, "Dod3Android", __VA_ARGS__); } while (0)
++#else
++#define VK_LOGI(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
++#define VK_LOGE(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
++#endif
+ #include "rsx_vulkan_engine.h"
+ 
+ int rsx_vulkan_engine_wanted(void)
+diff --git a/runtime/platform/vm_watch.c b/runtime/platform/vm_watch.c
+index ffba185..31f8273 100644
+--- a/runtime/platform/vm_watch.c
++++ b/runtime/platform/vm_watch.c
+@@ -192,7 +192,11 @@ void vm_watch_init(uint8_t* base, uint64_t size)
+     s_quar = (volatile uint32_t*)calloc(s_count, sizeof *s_quar);
+     if (!s_gen || !s_prot || !s_quar) return;
+     s_base = base; s_size = size;
++#ifdef __ANDROID__
++    { const char* e = getenv("RSX_TEX_WATCH"); s_on = (e && *e == '1'); }
++#else
+     { const char* e = getenv("RSX_TEX_WATCH"); s_on = !(e && *e == '0'); }
++#endif
+ }
+ 
+ int vm_watch_available(void) { return s_on; }
+diff --git a/runtime/platform/win32_compat.c b/runtime/platform/win32_compat.c
+index 11a7480..7472a43 100644
+--- a/runtime/platform/win32_compat.c
++++ b/runtime/platform/win32_compat.c
+@@ -39,6 +39,10 @@
+ #include <errno.h>
+ #include <signal.h>
+ #include <string.h>
++#if defined(__ANDROID__)
++#  include <sched.h>
++#  include <sys/syscall.h>
++#endif
+ #include <sys/mman.h>
+ #include <sys/resource.h>
+ #include <sys/time.h>
+@@ -453,7 +457,14 @@ static void apply_priority(pthread_t pt, DWORD tid, int level, int is_self)
+ 
+ static void apply_affinity(pthread_t pt, DWORD_PTR mask)
+ {
+-#if defined(__linux__)
++#if defined(__ANDROID__)
++    if (pthread_equal(pt, pthread_self())) {
++        cpu_set_t set; CPU_ZERO(&set);
++        for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
++            if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
++        sched_setaffinity((pid_t)syscall(SYS_gettid), sizeof set, &set);
++    }
++#elif defined(__linux__)
+     cpu_set_t set; CPU_ZERO(&set);
+     for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
+         if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
+@@ -840,7 +851,11 @@ static int park_thread_locked(ps3_obj* t)
+         struct sigaction sa;
+         memset(&sa, 0, sizeof sa);
+         sa.sa_sigaction = park_handler;
++#if defined(__ANDROID__)
++        sa.sa_flags     = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
++#else
+         sa.sa_flags     = SA_SIGINFO | SA_RESTART;
++#endif
+         sigemptyset(&sa.sa_mask);
+         if (sigaction(PS3_SUSPEND_SIGNAL, &sa, NULL) != 0) return 0;
+         s_park_installed = 1;
