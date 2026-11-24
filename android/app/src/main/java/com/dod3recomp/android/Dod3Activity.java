@@ -42,6 +42,7 @@ public class Dod3Activity extends SDLActivity {
     private InputManager inputManager;
     private InputManager.InputDeviceListener inputDeviceListener;
     private Method sdlPollInputMethod;
+    private AlertDialog setupDialog;
     private boolean gateCleared = false;
 
     @Override
@@ -55,10 +56,8 @@ public class Dod3Activity extends SDLActivity {
         configureImmersiveMode();
         syncBaseDirToNative();
         setupControllerHotplug();
-        if (!hasGameFiles() && !isRuntimeSmokeMode()) {
+        if (!checkAndReleaseGate()) {
             showSetupDialog();
-        } else {
-            gateCleared = true;
         }
     }
 
@@ -66,11 +65,20 @@ public class Dod3Activity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         configureImmersiveMode();
-        syncBaseDirToNative();
+        if (!checkAndReleaseGate()) {
+            showSetupDialog();
+        }
+    }
+
+    @Override
+    protected void resumeNativeThread() {
+        if (!gateCleared) return;
+        super.resumeNativeThread();
     }
 
     @Override
     protected void onDestroy() {
+        dismissSetupDialog();
         if (inputManager != null && inputDeviceListener != null) {
             inputManager.unregisterInputDeviceListener(inputDeviceListener);
             inputDeviceListener = null;
@@ -151,12 +159,30 @@ public class Dod3Activity extends SDLActivity {
         startActivityForResult(i, REQ_IMPORT_FILE);
     }
 
+    private void dismissSetupDialog() {
+        if (setupDialog != null) {
+            if (setupDialog.isShowing()) setupDialog.dismiss();
+            setupDialog = null;
+        }
+    }
+
+    private boolean checkAndReleaseGate() {
+        syncBaseDirToNative();
+        if (gateCleared) return true;
+        if (hasGameFiles() || isRuntimeSmokeMode()) {
+            gateCleared = true;
+            dismissSetupDialog();
+            resumeNativeThread();
+            return true;
+        }
+        return false;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_STORAGE) {
-            syncBaseDirToNative();
-            if (!gateCleared) showSetupDialog();
+            if (!checkAndReleaseGate()) showSetupDialog();
             return;
         }
         if (requestCode == REQ_IMPORT_FILE && resultCode == RESULT_OK && data != null && data.getData() != null) {
@@ -164,17 +190,27 @@ public class Dod3Activity extends SDLActivity {
         }
     }
 
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_STORAGE && !checkAndReleaseGate()) {
+            showSetupDialog();
+        }
+    }
+
     private void importUriAtomic(Uri uri) {
         File base = resolveBaseDir();
-        File inbox = new File(base, "import");
-        inbox.mkdirs();
         String name = queryDisplayName(uri);
         if (name == null || name.isEmpty()) name = "imported_file.bin";
         name = name.replace("/", "_").replace("\\", "_").replace("..", "_");
-        final File part = new File(inbox, name + ".part");
-        final File target = new File(inbox, name);
+        final boolean isBootElf = "EBOOT_101.ELF".equalsIgnoreCase(name);
+        final File destDir = new File(base, isBootElf ? "elf" : "import");
+        destDir.mkdirs();
+        final String targetName = isBootElf ? "EBOOT_101.ELF" : name;
+        final File part = new File(destDir, targetName + ".part");
+        final File target = new File(destDir, targetName);
 
-        Toast.makeText(this, "Mengimpor " + name + "...", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Mengimpor " + targetName + "...", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             boolean ok = false;
             try (InputStream in = getContentResolver().openInputStream(uri);
@@ -190,12 +226,12 @@ public class Dod3Activity extends SDLActivity {
                 part.delete();
             }
             final boolean finalOk = ok;
-            final String finalName = name;
+            final String destLabel = (isBootElf ? "elf/" : "import/") + targetName;
             mainHandler.post(() -> {
                 Toast.makeText(Dod3Activity.this,
-                        finalOk ? "Tersimpan di import/" + finalName : "Gagal mengimpor file",
+                        finalOk ? "Tersimpan di " + destLabel : "Gagal mengimpor file",
                         Toast.LENGTH_LONG).show();
-                showSetupDialog();
+                if (!checkAndReleaseGate()) showSetupDialog();
             });
         }).start();
     }
@@ -209,17 +245,23 @@ public class Dod3Activity extends SDLActivity {
     }
 
     private void showSetupDialog() {
+        if (gateCleared || isFinishing() || isDestroyed()) return;
+        if (setupDialog != null && setupDialog.isShowing()) return;
         File base = resolveBaseDir();
         String msg = "Folder data game:\n" + base.getAbsolutePath() + "\n\n"
                 + "Letakkan game/disc/ (BLUS31197) + elf/EBOOT_101.ELF, atau impor berkas ISO/PKG.";
-        new AlertDialog.Builder(this)
+        setupDialog = new AlertDialog.Builder(this)
                 .setTitle("Drakengard 3 Recompiled")
                 .setMessage(msg)
                 .setCancelable(false)
                 .setPositiveButton("Allow Storage", (d, w) -> requestStorageAccess())
                 .setNeutralButton("Diagnostics", (d, w) -> showDiagnosticsDialog())
                 .setNegativeButton("Import File", (d, w) -> launchSafImporter())
-                .show();
+                .create();
+        setupDialog.setOnDismissListener(d -> {
+            if (setupDialog == d) setupDialog = null;
+        });
+        setupDialog.show();
     }
 
     private void showDiagnosticsDialog() {
@@ -235,7 +277,7 @@ public class Dod3Activity extends SDLActivity {
                 .setTitle("Diagnostik Android / Vulkan")
                 .setMessage(diag)
                 .setPositiveButton("OK", (d, w) -> {
-                    if (!hasGameFiles() && !isRuntimeSmokeMode()) showSetupDialog();
+                    if (!checkAndReleaseGate()) showSetupDialog();
                 })
                 .show();
     }

@@ -386,7 +386,7 @@ index a11ddd9..934d665 100644
          fprintf(stderr, "ERROR: could not start the guest thread\n");
 diff --git a/src/os/android/setup_android.cpp b/src/os/android/setup_android.cpp
 new file mode 100644
-index 0000000..2468a54
+index 0000000..85d21fb
 --- /dev/null
 +++ b/src/os/android/setup_android.cpp
 @@ -0,0 +1,284 @@
@@ -732,10 +732,10 @@ index 0000000..7a67168
 +}
 diff --git a/src/ui/ui_android.cpp b/src/ui/ui_android.cpp
 new file mode 100644
-index 0000000..43e6645
+index 0000000..2022731
 --- /dev/null
 +++ b/src/ui/ui_android.cpp
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,137 @@
 +/*
 + * Android Dear ImGui window layer (src/ui/ui.h): SDL2 fullscreen + SDL_Renderer2.
 + * File picking on Android is handled via Storage Access Framework in Dod3Activity.
@@ -777,8 +777,9 @@ index 0000000..43e6645
 +        fprintf(stderr, "[setup] SDL_CreateWindow: %s\n", SDL_GetError());
 +        return false;
 +    }
-+    s_ui.renderer = SDL_CreateRenderer(s_ui.window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-+    if (!s_ui.renderer) s_ui.renderer = SDL_CreateRenderer(s_ui.window, -1, SDL_RENDERER_SOFTWARE);
++    /* Prefer software renderer during setup wizard so EGL/GLES never attaches to Android's ANativeWindow before Vulkan init. */
++    s_ui.renderer = SDL_CreateRenderer(s_ui.window, -1, SDL_RENDERER_SOFTWARE);
++    if (!s_ui.renderer) s_ui.renderer = SDL_CreateRenderer(s_ui.window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 +    if (!s_ui.renderer) {
 +        SDL_DestroyWindow(s_ui.window);
 +        s_ui = Ui{};

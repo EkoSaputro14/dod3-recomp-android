@@ -61,7 +61,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                arguments += listOf("-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
                 val smoke = if (project.hasProperty("dod3RuntimeSmoke")) project.property("dod3RuntimeSmoke").toString() else "ON"
                 arguments += "-DDOD3_ANDROID_RUNTIME_SMOKE=$smoke"
                 if (project.hasProperty("recompDir")) {
