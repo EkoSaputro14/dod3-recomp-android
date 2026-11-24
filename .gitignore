@@ -1,0 +1,38 @@
+# Build artifacts & caches
+build/
+out/
+dist/
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+*.apk
+*.aab
+*.ap_
+*.jks
+*.keystore
+
+# Upstream & third-party cloned during sync/build
+upstream/
+third_party/
+recompiled/
+recompiled_101/
+spu/
+elf/
+game/
+gamedata/
+cache/
+.venv/
+
+# Proprietary PS3 files (never commit unencrypted)
+*.ELF
+*.elf
+*.BIN
+*.bin
+*.prx
+*.sprx
+*.iso
+*.pkg
+*.PUP
+keys.txt
+*.log
