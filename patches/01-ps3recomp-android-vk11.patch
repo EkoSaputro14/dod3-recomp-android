@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index c398ede..8e4e891 100644
+index c398ede..f648be3 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -53,7 +53,14 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
@@ -18,7 +18,7 @@ index c398ede..8e4e891 100644
      if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
          message(FATAL_ERROR "Vulkan headers not found. Debian/Ubuntu: "
              "libvulkan-dev, Fedora: vulkan-headers -- or pass "
-@@ -149,7 +156,11 @@ if(WIN32 AND PS3RECOMP_PAD_SDL2)
+@@ -149,17 +156,25 @@ if(WIN32 AND PS3RECOMP_PAD_SDL2)
      target_compile_definitions(ps3recomp_runtime PRIVATE PS3RECOMP_PAD_USE_SDL2)
  endif()
  if(NOT WIN32 OR PS3RECOMP_PAD_SDL2)
@@ -31,7 +31,25 @@ index c398ede..8e4e891 100644
      if(SDL2_FOUND)
          if(TARGET SDL2::SDL2)
              target_link_libraries(ps3recomp_runtime PRIVATE SDL2::SDL2)
-@@ -190,6 +201,10 @@ if(NOT WIN32)
+             # SDL2::SDL2 exports <prefix>/include/SDL2, but the sources include
+             # <SDL2/SDL.h>. /usr/include hides that on Linux; Homebrew does not.
+             get_target_property(_sdl2_incs SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+-            foreach(_inc IN LISTS _sdl2_incs)
+-                get_filename_component(_parent "${_inc}" DIRECTORY)
+-                target_include_directories(ps3recomp_runtime PRIVATE "${_parent}")
+-            endforeach()
++            if(_sdl2_incs)
++                foreach(_inc IN LISTS _sdl2_incs)
++                    if(NOT _inc MATCHES "\\$<")
++                        get_filename_component(_parent "${_inc}" DIRECTORY)
++                        target_include_directories(ps3recomp_runtime PRIVATE "${_parent}")
++                    endif()
++                endforeach()
++            endif()
+         else()
+             target_include_directories(ps3recomp_runtime PRIVATE ${SDL2_INCLUDE_DIRS})
+             foreach(_inc IN LISTS SDL2_INCLUDE_DIRS)
+@@ -190,6 +205,10 @@ if(NOT WIN32)
      target_link_libraries(ps3recomp_runtime PRIVATE Threads::Threads)
  endif()
  
@@ -42,7 +60,7 @@ index c398ede..8e4e891 100644
  # Frame capture (libs/video/rsx_capture.c) writes gzip and the replay
  # harness reads it. Without zlib on the host (a bare Windows runner) the
  # capture is compiled out and rsx_replay is not built; the game is unaffected.
-@@ -274,9 +289,28 @@ endif()
+@@ -274,9 +293,28 @@ endif()
  # PS3RECOMP_MSL=OFF leaves it out where nothing presents through Metal: a
  # Linux port's release, which would otherwise carry libspirv-cross for it.
  option(PS3RECOMP_MSL "Build the HLSL -> MSL translator (Metal; on Linux for its tests)" ON)
@@ -72,7 +90,7 @@ index c398ede..8e4e891 100644
  
      # spirv-cross's C API. Debian ships it as a shared library and Homebrew as
      # a static one, under different pkg-config names -- and pkg-config itself
-@@ -363,7 +397,7 @@ if(PS3RECOMP_RSX_VULKAN)
+@@ -363,7 +401,7 @@ if(PS3RECOMP_RSX_VULKAN)
          # Windows build runs with RSX_BACKEND=vulkan, in an SDL2 window: what a
          # port boots on Linux (rsx_vulkan_engine_init). It brings the mouse
          # (rsx_host_mouse.h) with its window, so rsx_host_mouse.c stands down.
@@ -81,7 +99,7 @@ index c398ede..8e4e891 100644
              set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_vulkan_engine.c"
                           APPEND PROPERTY COMPILE_DEFINITIONS PS3RECOMP_HAVE_VULKAN=1)
              set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_vulkan_engine.c"
-@@ -719,8 +753,7 @@ endif()
+@@ -719,8 +757,7 @@ endif()
  #
  # The HLE NID table is generated exactly as a port generates it, so the smoke
  # title's firmware imports resolve through the same bridge a game's do.

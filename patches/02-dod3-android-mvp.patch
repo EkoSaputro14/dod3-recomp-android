@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4462af5..c568877 100644
+index 4462af5..c1ad822 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -19,6 +19,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -214,7 +214,7 @@ index 4462af5..c568877 100644
          "-framework MetalKit" "-framework GameController" "-framework UniformTypeIdentifiers")
  endif()
  # Linux: SDL2 for the setup's window (the runtime links its own use of it
-@@ -571,22 +624,31 @@ endif()
+@@ -571,22 +624,39 @@ endif()
  if(DOD3_LINUX)
      find_package(SDL2 REQUIRED)
      find_package(Threads REQUIRED)
@@ -222,11 +222,18 @@ index 4462af5..c568877 100644
 +    target_link_libraries(${DOD3_TARGET} PRIVATE SDL2::SDL2 Threads::Threads ${CMAKE_DL_LIBS})
      # <SDL2/SDL.h>: SDL2::SDL2 exports <prefix>/include/SDL2
      get_target_property(_sdl2_incs SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
-     foreach(_inc IN LISTS _sdl2_incs)
-         get_filename_component(_parent "${_inc}" DIRECTORY)
+-    foreach(_inc IN LISTS _sdl2_incs)
+-        get_filename_component(_parent "${_inc}" DIRECTORY)
 -        target_include_directories(${PROJECT_NAME} PRIVATE "${_parent}")
-+        target_include_directories(${DOD3_TARGET} PRIVATE "${_parent}")
-     endforeach()
+-    endforeach()
++    if(_sdl2_incs)
++        foreach(_inc IN LISTS _sdl2_incs)
++            if(NOT _inc MATCHES "\\$<")
++                get_filename_component(_parent "${_inc}" DIRECTORY)
++                target_include_directories(${DOD3_TARGET} PRIVATE "${_parent}")
++            endif()
++        endforeach()
++    endif()
      # No rpath: everything dod3 links is the system's (tools/package_linux.sh
      # checks), and an rpath CMake writes empty entries into searches the
      # current directory.
@@ -236,10 +243,14 @@ index 4462af5..c568877 100644
 +    find_package(Threads REQUIRED)
 +    target_link_libraries(${DOD3_TARGET} PRIVATE SDL2::SDL2 Threads::Threads ${CMAKE_DL_LIBS} log android m)
 +    get_target_property(_sdl2_incs SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
-+    foreach(_inc IN LISTS _sdl2_incs)
-+        get_filename_component(_parent "${_inc}" DIRECTORY)
-+        target_include_directories(${DOD3_TARGET} PRIVATE "${_parent}")
-+    endforeach()
++    if(_sdl2_incs)
++        foreach(_inc IN LISTS _sdl2_incs)
++            if(NOT _inc MATCHES "\\$<")
++                get_filename_component(_parent "${_inc}" DIRECTORY)
++                target_include_directories(${DOD3_TARGET} PRIVATE "${_parent}")
++            endif()
++        endforeach()
++    endif()
 +    target_link_options(${DOD3_TARGET} PRIVATE -Wl,-z,max-page-size=16384)
  endif()
  
@@ -250,7 +261,7 @@ index 4462af5..c568877 100644
  
  # Windows system import libraries. dbghelp symbolizes crash-handler addresses
  # against the PDB, user32 and gdi32 are what the backend's window and its GDI
-@@ -594,7 +656,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+@@ -594,7 +664,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
  # anything a POSIX linker can find; the D3D12 backend's own imports come in
  # through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c.
  if(WIN32)
@@ -259,7 +270,7 @@ index 4462af5..c568877 100644
          dbghelp
          user32
          gdi32
-@@ -606,7 +668,7 @@ if(WIN32)
+@@ -606,7 +676,7 @@ if(WIN32)
      # win_stdio_init). -DDOD3_CONSOLE=ON builds a console program again.
      option(DOD3_CONSOLE "Link dod3.exe as a console program" OFF)
      if(NOT DOD3_CONSOLE)
@@ -268,7 +279,7 @@ index 4462af5..c568877 100644
      endif()
  endif()
  
-@@ -614,12 +676,12 @@ endif()
+@@ -614,12 +684,12 @@ endif()
  # Compiler-specific flags
  # ---------------------------------------------------------------------------
  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -283,7 +294,7 @@ index 4462af5..c568877 100644
          /W3 /wd4100 /wd4244 /wd4267
          /Zc:__cplusplus         # report correct __cplusplus value
          # ppu_recomp.h defines PPU_FENCE, the lowering of the guest's
-@@ -629,7 +691,7 @@ elseif(MSVC)
+@@ -629,7 +699,7 @@ elseif(MSVC)
          # build already carries the same flag for the same reason.
          /experimental:c11atomics
      )
@@ -292,7 +303,7 @@ index 4462af5..c568877 100644
          _CRT_SECURE_NO_WARNINGS
      )
  endif()
-@@ -787,4 +849,6 @@ set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3
+@@ -787,4 +857,6 @@ set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3
  # ---------------------------------------------------------------------------
  # Install
  # ---------------------------------------------------------------------------
