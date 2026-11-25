@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4462af5..c1ad822 100644
+index 4462af5..471efff 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -19,6 +19,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -15,7 +15,7 @@ index 4462af5..c1ad822 100644
  
  # ---------------------------------------------------------------------------
  # Standards
-@@ -45,6 +51,33 @@ endif()
+@@ -45,6 +51,34 @@ endif()
  #         -DPS3RECOMP_DIR=/path/to/ps3recomp \
  #         -DRECOMP_DIR=/path/to/my_game/recompiled
  #
@@ -31,6 +31,7 @@ index 4462af5..c1ad822 100644
 +    add_library(main SHARED
 +        src/os/android/smoke_main.cpp
 +        src/os/android/setup_android.cpp
++        "${PS3RECOMP_DIR}/runtime/host/host_stubs.c"
 +    )
 +    target_compile_definitions(main PRIVATE DOD3_ANDROID_RUNTIME_SMOKE=1)
 +    target_include_directories(main PRIVATE
@@ -49,7 +50,7 @@ index 4462af5..c1ad822 100644
  if(NOT DEFINED PS3RECOMP_DIR)
      # Default: the ps3recomp submodule in this repo
      set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ps3recomp")
-@@ -135,8 +168,8 @@ endif()
+@@ -135,8 +169,8 @@ endif()
  # Linux: the Vulkan option builds the draw engine's Vulkan backend there too
  # (it needs the Vulkan headers and glslang with SPIRV-Tools: Debian/Ubuntu
  # libvulkan-dev glslang-dev glslang-tools spirv-tools).
@@ -60,7 +61,7 @@ index 4462af5..c1ad822 100644
      # nothing presents through Metal here: no spirv-cross in the release
      set(PS3RECOMP_MSL OFF CACHE BOOL "Build the HLSL -> MSL translator" FORCE)
  endif()
-@@ -144,11 +177,11 @@ add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
+@@ -144,11 +178,11 @@ add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                   EXCLUDE_FROM_ALL)
  # (the runtime's public PS3RECOMP_VULKAN_ENGINE_SDL says it built the engine:
  # its option's variables stay in the subdirectory's scope)
@@ -75,7 +76,7 @@ index 4462af5..c1ad822 100644
                          "Debian/Ubuntu: apt install glslang-dev glslang-tools spirv-tools libvulkan-dev")
  endif()
  
-@@ -284,6 +317,8 @@ elseif(DOD3_LINUX)
+@@ -284,6 +318,8 @@ elseif(DOD3_LINUX)
      # The data folder, the log file and the setup's start: the counterpart of
      # os/win32/setup_win.cpp and os/macos/setup_mac.mm.
      list(APPEND PORT_PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/os/linux/setup_linux.cpp")
@@ -84,7 +85,7 @@ index 4462af5..c1ad822 100644
  endif()
  
  # The installer (src/install/install.h): the core on every platform; the pages
-@@ -336,12 +371,15 @@ elseif(APPLE)
+@@ -336,12 +372,15 @@ elseif(APPLE)
                          "${IMGUI_DIR}/backends/imgui_impl_osx.mm"
                          "${IMGUI_DIR}/backends/imgui_impl_metal.mm"
                   APPEND PROPERTY COMPILE_OPTIONS "-fobjc-arc")
@@ -103,7 +104,7 @@ index 4462af5..c1ad822 100644
      list(APPEND SETUP_SOURCES
          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/wizard.cpp"
          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/launcher.cpp"
-@@ -349,7 +387,7 @@ elseif(DOD3_LINUX)
+@@ -349,7 +388,7 @@ elseif(DOD3_LINUX)
          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/look.cpp"
          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/setup_shared.cpp"
          "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/png.cpp"
@@ -112,7 +113,7 @@ index 4462af5..c1ad822 100644
          ${IMGUI_SOURCES})
  endif()
  # The retail PKG key, read from the submodule's tools/pkg_extract.py
-@@ -371,7 +409,7 @@ set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/install/pkg.cpp" APPEND PRO
+@@ -371,7 +410,7 @@ set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/install/pkg.cpp" APPEND PRO
  set_property(SOURCE ${SETUP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${IMGUI_DIR}")
  # third-party code: its warnings are not ours to act on
  set_property(SOURCE ${IMGUI_SOURCES} APPEND PROPERTY COMPILE_OPTIONS "-w")
@@ -121,7 +122,7 @@ index 4462af5..c1ad822 100644
      # the key art's PNG decoder: stb_image, the copy in the runtime's codec
      # library, compiled privately (src/ui/png.cpp)
      set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/png.cpp" APPEND PROPERTY
-@@ -443,16 +481,31 @@ set(PORT_SOURCES
+@@ -443,16 +482,31 @@ set(PORT_SOURCES
      ${PORT_UI_SOURCES}
  )
  
@@ -163,7 +164,7 @@ index 4462af5..c1ad822 100644
  
  # The lifted SPU sources use bare #include "spu_context.h". Scope that include
  # directory (and their flags) to those TUs alone: adding it to the whole target
-@@ -498,7 +551,7 @@ if(WIN32 AND DOD3_SYMBOLS)
+@@ -498,7 +552,7 @@ if(WIN32 AND DOD3_SYMBOLS)
          PROPERTIES COMPILE_OPTIONS "/Z7")
      # These already carry options (set above); append rather than replace.
      set_property(SOURCE ${SPU_SOURCES} "${LIBSRE_LIFTED_CPP}" ${SETUP_SOURCES} APPEND PROPERTY COMPILE_OPTIONS "/Z7")
@@ -172,7 +173,7 @@ index 4462af5..c1ad822 100644
  endif()
  
  # The player's settings file goes beside the executable once; a copy the
-@@ -517,7 +570,7 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/gen/app_version.h" CONTENT
+@@ -517,7 +571,7 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/gen/app_version.h" CONTENT
  #define DOD3_VER_PATCH ${PROJECT_VERSION_PATCH}
  #define DOD3_VERSION_STRING \"${DOD3_VERSION_LABEL}\"
  ")
@@ -181,7 +182,7 @@ index 4462af5..c1ad822 100644
  
  # The button-prompt atlases (src/res/prompts, drawn by tools/prompt_atlas.py)
  # as arrays in gen/prompts_data.h, for src/patches/prompts.cpp: the pads',
-@@ -539,13 +592,13 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/gen/prompts_data.h" CONTENT "${_promp
+@@ -539,13 +593,13 @@ file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/gen/prompts_data.h" CONTENT "${_promp
  if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/res/app.rc")
      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/res/app.rc"
          PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/gen;${CMAKE_CURRENT_SOURCE_DIR}/src/res")
@@ -198,7 +199,7 @@ index 4462af5..c1ad822 100644
      "${RECOMP_DIR}"                            # the generated ppu_recomp.h
      "${PS3RECOMP_DIR}/include"
      "${PS3RECOMP_DIR}/runtime/ppu"
-@@ -557,13 +610,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
+@@ -557,13 +611,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
      "${CMAKE_CURRENT_SOURCE_DIR}"
  )
  
@@ -214,7 +215,7 @@ index 4462af5..c1ad822 100644
          "-framework MetalKit" "-framework GameController" "-framework UniformTypeIdentifiers")
  endif()
  # Linux: SDL2 for the setup's window (the runtime links its own use of it
-@@ -571,22 +624,39 @@ endif()
+@@ -571,22 +625,39 @@ endif()
  if(DOD3_LINUX)
      find_package(SDL2 REQUIRED)
      find_package(Threads REQUIRED)
@@ -261,7 +262,7 @@ index 4462af5..c1ad822 100644
  
  # Windows system import libraries. dbghelp symbolizes crash-handler addresses
  # against the PDB, user32 and gdi32 are what the backend's window and its GDI
-@@ -594,7 +664,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+@@ -594,7 +665,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
  # anything a POSIX linker can find; the D3D12 backend's own imports come in
  # through the #pragma comment(lib) in libs/video/rsx_d3d12_backend.c.
  if(WIN32)
@@ -270,7 +271,7 @@ index 4462af5..c1ad822 100644
          dbghelp
          user32
          gdi32
-@@ -606,7 +676,7 @@ if(WIN32)
+@@ -606,7 +677,7 @@ if(WIN32)
      # win_stdio_init). -DDOD3_CONSOLE=ON builds a console program again.
      option(DOD3_CONSOLE "Link dod3.exe as a console program" OFF)
      if(NOT DOD3_CONSOLE)
@@ -279,7 +280,7 @@ index 4462af5..c1ad822 100644
      endif()
  endif()
  
-@@ -614,12 +684,12 @@ endif()
+@@ -614,12 +685,12 @@ endif()
  # Compiler-specific flags
  # ---------------------------------------------------------------------------
  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -294,7 +295,7 @@ index 4462af5..c1ad822 100644
          /W3 /wd4100 /wd4244 /wd4267
          /Zc:__cplusplus         # report correct __cplusplus value
          # ppu_recomp.h defines PPU_FENCE, the lowering of the guest's
-@@ -629,7 +699,7 @@ elseif(MSVC)
+@@ -629,7 +700,7 @@ elseif(MSVC)
          # build already carries the same flag for the same reason.
          /experimental:c11atomics
      )
@@ -303,7 +304,7 @@ index 4462af5..c1ad822 100644
          _CRT_SECURE_NO_WARNINGS
      )
  endif()
-@@ -787,4 +857,6 @@ set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3
+@@ -787,4 +858,6 @@ set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3
  # ---------------------------------------------------------------------------
  # Install
  # ---------------------------------------------------------------------------
@@ -687,10 +688,10 @@ index 0000000..85d21fb
 +}
 diff --git a/src/os/android/smoke_main.cpp b/src/os/android/smoke_main.cpp
 new file mode 100644
-index 0000000..7a67168
+index 0000000..09ab3c6
 --- /dev/null
 +++ b/src/os/android/smoke_main.cpp
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,51 @@
 +/*
 + * Day-1 Android runtime smoke entrypoint (DOD3_ANDROID_RUNTIME_SMOKE=1).
 + * Verifies SDL2 + Vulkan 1.1-1.3 draw engine + glslang SPIR-V init on device
@@ -706,6 +707,7 @@ index 0000000..7a67168
 +#include "rsx_vulkan_engine.h"
 +
 +extern "C" {
++uint8_t* vm_base = nullptr;
 +const char* dod3_android_data_dir(void);
 +void dod3_android_log_to_file(void);
 +}
