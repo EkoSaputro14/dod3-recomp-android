@@ -252,10 +252,22 @@ index 3673985..14a457d 100644
      setcontext(&f->sched->back);
  #endif
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
-index fab39e5..bd6b64c 100644
+index fab39e5..c0d18a2 100644
 --- a/libs/video/rsx_shader_spirv.cpp
 +++ b/libs/video/rsx_shader_spirv.cpp
-@@ -35,6 +35,7 @@ void put_log(char* log, u32 log_size, const char* what, const char* detail)
+@@ -23,7 +23,11 @@
+ #include <vector>
+ #include <glslang/Public/ShaderLang.h>
+ #include <glslang/Public/ResourceLimits.h>
++#if defined(__has_include) && __has_include(<glslang/SPIRV/GlslangToSpv.h>)
+ #include <glslang/SPIRV/GlslangToSpv.h>
++#else
++#include <SPIRV/GlslangToSpv.h>
++#endif
+ 
+ namespace {
+ 
+@@ -35,6 +39,7 @@ void put_log(char* log, u32 log_size, const char* what, const char* detail)
  
  std::once_flag s_init_once;
  bool s_init_ok;
@@ -263,7 +275,7 @@ index fab39e5..bd6b64c 100644
  
  /* One translation through glslang. False with the reason in `log`. */
  bool translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv, char* log, u32 log_size)
-@@ -48,8 +49,16 @@ bool translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv, ch
+@@ -48,8 +53,16 @@ bool translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv, ch
      const char* strings[1] = { hlsl };
      shader.setStrings(strings, 1);
      shader.setEnvInput(glslang::EShSourceHlsl, lang, glslang::EShClientVulkan, 100);
@@ -282,7 +294,7 @@ index fab39e5..bd6b64c 100644
      /* SPIR-V FragCoord.w is 1/w (FXC's SV_POSITION.w is w): tells the FP
       * decompiler's _rsx_inv_w helper which one it gets. */
      shader.setPreamble("#define RSX_FRAGCOORD_W_IS_RCP 1\n");
-@@ -198,6 +207,7 @@ u32 copy_out(const std::vector<unsigned int>& spirv, u32** words)
+@@ -198,6 +211,7 @@ u32 copy_out(const std::vector<unsigned int>& spirv, u32** words)
  }  // namespace
  
  extern "C" int rsx_hlsl_to_spirv_available(void) { return 1; }
@@ -290,7 +302,7 @@ index fab39e5..bd6b64c 100644
  
  extern "C" u32 rsx_hlsl_to_spirv(const char* hlsl, int stage, u32** words, char* log, u32 log_size)
  {
-@@ -254,6 +264,7 @@ extern "C" void rsx_hlsl_to_spirv_cache_reset(void)
+@@ -254,6 +268,7 @@ extern "C" void rsx_hlsl_to_spirv_cache_reset(void)
  #else   /* no glslang */
  
  extern "C" int rsx_hlsl_to_spirv_available(void) { return 0; }
