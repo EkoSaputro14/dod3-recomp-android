@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 4462af5..471efff 100644
+index 4462af5..0270068 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -19,6 +19,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -304,6 +304,24 @@ index 4462af5..471efff 100644
          _CRT_SECURE_NO_WARNINGS
      )
  endif()
+@@ -686,7 +757,7 @@ if(MSVC)
+             message(FATAL_ERROR "DOD3_PGO=generate: clang_rt.profile-x86_64.lib not found under ${_llvm_bin}/../lib/clang")
+         endif()
+         list(GET _profile_rt -1 _profile_rt)
+-        target_link_libraries(${PROJECT_NAME} PRIVATE "${_profile_rt}")
++        target_link_libraries(${DOD3_TARGET} PRIVATE "${_profile_rt}")
+         set_property(SOURCE src/main.cpp APPEND PROPERTY COMPILE_DEFINITIONS DOD3_PGO_GENERATE)
+         message(STATUS "PGO:             instrumented lifted code (${_profile_rt})")
+     elseif(DOD3_PGO MATCHES "^use:(.+)$")
+@@ -736,7 +807,7 @@ else()
+         set(DOD3_PGO "" CACHE STRING "Profile-guided optimisation of the lifted code: generate, or use:<profdata>")
+         if(DOD3_PGO STREQUAL "generate")
+             list(APPEND _recomp_opts "-fprofile-generate")
+-            target_link_options(${PROJECT_NAME} PRIVATE -fprofile-generate)
++            target_link_options(${DOD3_TARGET} PRIVATE -fprofile-generate)
+             set_property(SOURCE src/main.cpp APPEND PROPERTY COMPILE_DEFINITIONS DOD3_PGO_GENERATE)
+             message(STATUS "PGO:             instrumented lifted code")
+         elseif(DOD3_PGO MATCHES "^use:(.+)$")
 @@ -787,4 +858,6 @@ set_property(SOURCE ${RECOMP_SOURCES} APPEND PROPERTY INCLUDE_DIRECTORIES "${PS3
  # ---------------------------------------------------------------------------
  # Install
@@ -398,10 +416,10 @@ index a11ddd9..934d665 100644
          fprintf(stderr, "ERROR: could not start the guest thread\n");
 diff --git a/src/os/android/setup_android.cpp b/src/os/android/setup_android.cpp
 new file mode 100644
-index 0000000..85d21fb
+index 0000000..4d581c3
 --- /dev/null
 +++ b/src/os/android/setup_android.cpp
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,294 @@
 +/*
 + * Android platform glue: storage base path, logcat+file tee, setup check,
 + * and JNI diagnostics for Dod3Activity.
@@ -661,6 +679,16 @@ index 0000000..85d21fb
 +    env->ReleaseStringUTFChars(path, s);
 +}
 +
++extern "C" JNIEXPORT jboolean JNICALL
++Java_com_dod3recomp_android_Dod3Activity_nativeIsRuntimeSmoke(JNIEnv*, jclass)
++{
++#ifdef DOD3_ANDROID_RUNTIME_SMOKE
++    return JNI_TRUE;
++#else
++    return JNI_FALSE;
++#endif
++}
++
 +extern "C" JNIEXPORT jstring JNICALL
 +Java_com_dod3recomp_android_Dod3Activity_nativeRunDiagnostics(JNIEnv* env, jclass)
 +{
@@ -745,10 +773,10 @@ index 0000000..09ab3c6
 +}
 diff --git a/src/ui/ui_android.cpp b/src/ui/ui_android.cpp
 new file mode 100644
-index 0000000..2022731
+index 0000000..ee6093c
 --- /dev/null
 +++ b/src/ui/ui_android.cpp
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,157 @@
 +/*
 + * Android Dear ImGui window layer (src/ui/ui.h): SDL2 fullscreen + SDL_Renderer2.
 + * File picking on Android is handled via Storage Access Framework in Dod3Activity.
@@ -874,14 +902,34 @@ index 0000000..2022731
 +{
 +    (void)title;
 +    (void)filters;
-+    fprintf(stderr, "[setup] Android uses Storage Access Framework in Dod3Activity to import ISO/PKG files.\n");
-+    return {};
++    namespace fs = std::filesystem;
++    std::vector<fs::path> out;
++    const char* base = getenv("DOD3_INSTALL_BASE");
++    if (!base || !*base) return out;
++    std::error_code ec;
++    const fs::path import_dir = fs::path(base) / "import";
++    if (!fs::is_directory(import_dir, ec)) return out;
++    for (const auto& entry : fs::directory_iterator(import_dir, ec)) {
++        if (!entry.is_regular_file(ec)) continue;
++        const std::string fn = entry.path().filename().string();
++        if (fn.size() >= 5 && fn.compare(fn.size() - 5, 5, ".part") == 0) continue;
++        out.push_back(entry.path());
++    }
++    fprintf(stderr, "[setup] Android ui_pick_files found %zu file(s) in %s\n", out.size(), import_dir.c_str());
++    return out;
 +}
 +
 +std::filesystem::path ui_pick_folder(const char* title)
 +{
 +    (void)title;
-+    fprintf(stderr, "[setup] Android uses /storage/emulated/0/Dod3Recomp or SAF import.\n");
++    namespace fs = std::filesystem;
++    const char* base = getenv("DOD3_INSTALL_BASE");
++    if (base && *base) {
++        std::error_code ec;
++        const fs::path import_dir = fs::path(base) / "import";
++        if (fs::is_directory(import_dir, ec)) return import_dir;
++        return fs::path(base);
++    }
 +    return {};
 +}
 +

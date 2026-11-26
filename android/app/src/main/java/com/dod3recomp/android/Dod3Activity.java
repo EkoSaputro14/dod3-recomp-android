@@ -90,8 +90,7 @@ public class Dod3Activity extends SDLActivity {
     private boolean isRuntimeSmokeMode() {
         if (mBrokenLibraries) return false;
         try {
-            String diag = nativeRunDiagnostics();
-            return diag != null && diag.contains("RUNTIME SMOKE");
+            return nativeIsRuntimeSmoke();
         } catch (UnsatisfiedLinkError e) {
             return false;
         }
@@ -125,7 +124,17 @@ public class Dod3Activity extends SDLActivity {
         if (base == null) return false;
         File sfo = new File(base, "game/disc/PS3_GAME/PARAM.SFO");
         File elf = new File(base, "elf/EBOOT_101.ELF");
-        return sfo.isFile() && elf.isFile();
+        if (sfo.isFile() && elf.isFile()) return true;
+        File importDir = new File(base, "import");
+        File[] imported = importDir.listFiles();
+        if (imported != null) {
+            for (File f : imported) {
+                if (f.isFile() && !f.getName().endsWith(".part") && f.length() > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private boolean hasStoragePermission() {
@@ -220,6 +229,7 @@ public class Dod3Activity extends SDLActivity {
                     int n;
                     while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
                     out.getFD().sync();
+                    if (target.exists()) target.delete();
                     ok = part.renameTo(target);
                 }
             } catch (Exception e) {
@@ -349,5 +359,6 @@ public class Dod3Activity extends SDLActivity {
     }
 
     private static native void nativeSetBaseDir(String path);
+    private static native boolean nativeIsRuntimeSmoke();
     private static native String nativeRunDiagnostics();
 }
